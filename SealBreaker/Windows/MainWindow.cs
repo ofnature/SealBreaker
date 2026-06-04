@@ -1,8 +1,10 @@
 using Dalamud.Interface.Windowing;
 using Dalamud.Interface;
+using Dalamud.Interface.Textures;
 using SealBreaker.Services;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
@@ -15,6 +17,9 @@ public sealed class MainWindow : Window, IDisposable
     private static readonly Vector4 ColRed    = new(0.9f, 0.2f, 0.2f, 1f);
     private static readonly Vector4 ColYellow = new(0.9f, 0.9f, 0.2f, 1f);
     private static readonly Vector4 ColGray   = new(0.6f, 0.6f, 0.6f, 1f);
+    private static readonly Vector4 ColTitle  = new(1.0f, 0.78f, 0.35f, 1f);
+    private static readonly Vector2 WindowIconSize = new(40f, 40f);
+    private const float HeaderTitleScale = 1.45f;
 
     private static readonly string[] GcTownTabNames = ["Limsa", "Gridania", "Ul'dah"];
     private static readonly int[] GcTownTopLevelTabOrder = [0, 2, 1];
@@ -29,6 +34,7 @@ public sealed class MainWindow : Window, IDisposable
     private int _catalogCategoryFilter = 4;
     private string _catalogSearch = string.Empty;
     private int _catalogAddIndex;
+    private readonly ISharedImmediateTexture? _windowIcon;
 
     private static string GetWindowTitle() =>
         $"Seal Breaker v{GetDisplayVersion()}##SealBreaker";
@@ -50,6 +56,8 @@ public sealed class MainWindow : Window, IDisposable
 
     public MainWindow() : base(GetWindowTitle())
     {
+        _windowIcon = LoadWindowIcon();
+
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(420, 520),
@@ -65,6 +73,8 @@ public sealed class MainWindow : Window, IDisposable
 
         var cfg  = Plugin.Config;
         var ctrl = Plugin.Controller;
+
+        DrawWindowHeaderIcon();
 
         if (ImGui.BeginTabBar("##sealbreakerTabs"))
         {
@@ -109,6 +119,33 @@ public sealed class MainWindow : Window, IDisposable
 
             ImGui.EndTabBar();
         }
+    }
+
+    private static ISharedImmediateTexture? LoadWindowIcon()
+    {
+        var pluginDirectory = Service.PluginInterface.AssemblyLocation.DirectoryName;
+        if (string.IsNullOrWhiteSpace(pluginDirectory))
+            return null;
+
+        var iconPath = Path.Combine(pluginDirectory, "icon.png");
+        return File.Exists(iconPath)
+            ? Service.TextureProvider.GetFromFile(iconPath)
+            : null;
+    }
+
+    private void DrawWindowHeaderIcon()
+    {
+        if (_windowIcon != null && _windowIcon.TryGetWrap(out var icon, out _))
+        {
+            ImGui.Image(icon.Handle, WindowIconSize);
+            ImGui.SameLine();
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6f);
+        }
+
+        ImGui.SetWindowFontScale(HeaderTitleScale);
+        ImGui.TextColored(ColTitle, "Seal Breaker");
+        ImGui.SetWindowFontScale(1f);
+        ImGui.Separator();
     }
 
     private void DrawFarmTab(Configuration cfg)

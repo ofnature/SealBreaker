@@ -21,6 +21,7 @@ internal class Service
     [PluginService] internal static IChatGui                ChatGui         { get; private set; } = null!;
     [PluginService] internal static IAddonLifecycle         AddonLifecycle  { get; private set; } = null!;
     [PluginService] internal static ITargetManager          TargetManager   { get; private set; } = null!;
+    [PluginService] internal static ITextureProvider        TextureProvider { get; private set; } = null!;
 }
 
 /// <summary>

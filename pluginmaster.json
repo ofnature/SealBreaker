@@ -3,7 +3,7 @@
     "Author": "ofnature",
     "Name": "SealBreaker",
     "InternalName": "SealBreaker",
-    "AssemblyVersion": "1.0.0.71",
+    "AssemblyVersion": "1.0.0.74",
     "Description": "Automates dungeon farming, GC expert delivery, and grand company item purchasing. Supports AutoDuty and ADS.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/ofnature/SealBreaker",
