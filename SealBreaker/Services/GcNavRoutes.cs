@@ -43,8 +43,29 @@ internal static class GcNavRoutes
     public static readonly Vector3 LimsaRepairStairLanding = new(1.4003145f, 44.499996f, 143.35721f);
     public static readonly Vector3 LimsaRepairApproach = new(10f, 44f, 158f);
     public static readonly Vector3 LimsaRepairMenderPos = new(10f, 44.5f, 160f);
+    public static readonly Vector3 GridaniaRepairPos = new(24f, -8f, 93f);
+    public const string GridaniaRepairName = "Erkenbaud";
     public static readonly Vector3 UldahRepairPos = new(-155f, 12f, -24f);
     public const string UldahRepairName = "Hehezofu";
+
+    private static readonly Vector3[] GridaniaEntryWaypoints =
+    [
+        new(24f, 1f, 25f),
+        new(-31f, -3f, 13f),
+        new(-59f, -1f, 11f),
+        new(-67f, -0.5f, -8f),
+    ];
+
+    private static readonly Vector3[] GridaniaRepairWaypoints =
+    [
+        new(-59f, -1f, 11f),
+        new(-17f, -3f, 13f),
+        new(39f, -1.6f, 63f),
+        new(65f, -1f, 79f),
+        new(54f, -8f, 104f),
+        new(33f, -8f, 99f),
+        GridaniaRepairPos,
+    ];
 
     private static readonly Vector3[] UldahEntryWaypoints =
     [
@@ -70,7 +91,7 @@ internal static class GcNavRoutes
     private static readonly Vector3[][] BakedGcApproach =
     [
         LimsaUpperDeckFromLanding,
-        [],
+        GridaniaEntryWaypoints,
         UldahEntryWaypoints,
     ];
 
@@ -84,7 +105,7 @@ internal static class GcNavRoutes
     private static readonly Vector3[][] BakedRepair =
     [
         LimsaRepairToMender,
-        [],
+        GridaniaRepairWaypoints,
         UldahRepairToMenderWaypoints,
     ];
 

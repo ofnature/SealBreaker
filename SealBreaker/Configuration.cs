@@ -96,7 +96,7 @@ public class Configuration : IPluginConfiguration
     public const int AdsRepairModeNpcNoInn = 2;
     public const int AdsRepairModeNpcNoTeleportNoInn = 3;
 
-    public int Version { get; set; } = 17;
+    public int Version { get; set; } = 19;
 
     // ── Duty ──────────────────────────────────────────────────
     public int RunsPerCycle { get; set; } = 5;
@@ -122,7 +122,14 @@ public class Configuration : IPluginConfiguration
             MenderY = 44.5f,
             MenderZ = 160f,
         },
-        new() { RepairEnabled = true },
+        new()
+        {
+            RepairEnabled = true,
+            MenderName = GcNavRoutes.GridaniaRepairName,
+            MenderX = GcNavRoutes.GridaniaRepairPos.X,
+            MenderY = GcNavRoutes.GridaniaRepairPos.Y,
+            MenderZ = GcNavRoutes.GridaniaRepairPos.Z,
+        },
         new()
         {
             RepairEnabled = true,
@@ -175,6 +182,14 @@ public class Configuration : IPluginConfiguration
     public bool AutoExtractMateriaBetweenRuns { get; set; } = true;
     public bool AutoExtractMateriaAtCycleBoundary { get; set; } = true;
 
+    // ── Desynth EV / stats ────────────────────────────────────
+    public int DesynthTargetGil { get; set; } = 20_000_000;
+    public int DesynthCyclesPerDay { get; set; } = 2;
+    public int MooglePriceAlertThreshold { get; set; } = 50_000;
+    public bool MooglePriceAlertEnabled { get; set; } = false;
+    public Dictionary<uint, int> DesynthPriceOverrides { get; set; } = new();
+    public Dictionary<uint, bool> DesynthPriceOverrideEnabled { get; set; } = new();
+
     // Legacy v4 duckbone shop fields — ignored after migration (values live in GcShopDefaults)
     public int DuckboneShopRow { get; set; } = 40;
     public string DuckboneItemName { get; set; } = "Duckbone";
@@ -199,19 +214,27 @@ public class Configuration : IPluginConfiguration
                 new()
                 {
                     RepairEnabled = true,
+                    MenderName = GcNavRoutes.GridaniaRepairName,
+                    MenderX = GcNavRoutes.GridaniaRepairPos.X,
+                    MenderY = GcNavRoutes.GridaniaRepairPos.Y,
+                    MenderZ = GcNavRoutes.GridaniaRepairPos.Z,
+                },
+                new()
+                {
+                    RepairEnabled = true,
                     MenderName = GcNavRoutes.UldahRepairName,
                     MenderX = GcNavRoutes.UldahRepairPos.X,
                     MenderY = GcNavRoutes.UldahRepairPos.Y,
                     MenderZ = GcNavRoutes.UldahRepairPos.Z,
                 },
-                new() { RepairEnabled = true },
             ];
         }
 
         EnsurePortTicketDefaults();
         EnsureGcShopBuyLists();
+        EnsureDesynthDefaults();
 
-        if (Version >= 17)
+        if (Version >= 19)
             return;
 
         if (Version < 4)
@@ -304,8 +327,27 @@ public class Configuration : IPluginConfiguration
         if (Version < 15)
             MigrateGlobalRepairSettings();
 
-        Version = 17;
+        Version = 19;
         Save();
+    }
+
+    public void EnsureDesynthDefaults()
+    {
+        DesynthPriceOverrides ??= new Dictionary<uint, int>();
+        DesynthPriceOverrideEnabled ??= new Dictionary<uint, bool>();
+        var currentDropIds = KingcakeDesynth.Drops.Select(d => d.ItemId).ToHashSet();
+        foreach (var key in DesynthPriceOverrides.Keys.Where(k => !currentDropIds.Contains(k)).ToList())
+            DesynthPriceOverrides.Remove(key);
+        foreach (var key in DesynthPriceOverrideEnabled.Keys.Where(k => !currentDropIds.Contains(k)).ToList())
+            DesynthPriceOverrideEnabled.Remove(key);
+
+        foreach (var drop in KingcakeDesynth.Drops)
+        {
+            if (!DesynthPriceOverrides.ContainsKey(drop.ItemId))
+                DesynthPriceOverrides[drop.ItemId] = drop.FallbackPrice;
+            if (!DesynthPriceOverrideEnabled.ContainsKey(drop.ItemId))
+                DesynthPriceOverrideEnabled[drop.ItemId] = false;
+        }
     }
 
     public void ApplyAutomaticGrandCompanySettings()
@@ -381,6 +423,15 @@ public class Configuration : IPluginConfiguration
         {
             GcTownNav[i].RepairEnabled = true;
             GcTownNav[i].RepairThresholdPercent = Math.Clamp(GcTownNav[i].RepairThresholdPercent, 10, 90);
+        }
+
+        var gridania = GcTownNav[1];
+        if (string.IsNullOrWhiteSpace(gridania.MenderName))
+        {
+            gridania.MenderName = GcNavRoutes.GridaniaRepairName;
+            gridania.MenderX = GcNavRoutes.GridaniaRepairPos.X;
+            gridania.MenderY = GcNavRoutes.GridaniaRepairPos.Y;
+            gridania.MenderZ = GcNavRoutes.GridaniaRepairPos.Z;
         }
 
         var uldah = GcTownNav[2];

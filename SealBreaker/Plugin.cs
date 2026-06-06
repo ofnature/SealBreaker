@@ -39,6 +39,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginBanner = LoadTexture(Path.Combine(dir, "banner.png"));
 
         GcShopCatalog.EnsureInitialized();
+        DesynthTracker.Load();
 
         _mainWindow = new MainWindow();
         _windowSystem.AddWindow(_mainWindow);

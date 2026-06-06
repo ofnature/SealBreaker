@@ -2,6 +2,7 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using Lumina.Excel.Sheets;
 using System;
+using System.Linq;
 
 namespace SealBreaker.Services;
 
@@ -128,7 +129,23 @@ internal static class GcExchangeItemResolver
         if (rowName.Equals(itemName, StringComparison.OrdinalIgnoreCase))
             return 2;
 
+        var searchKey = NormalizeShopNameKey(itemName);
+        var rowKey = NormalizeShopNameKey(rowName);
+        if (searchKey.Length >= 3 && rowKey.Length >= 3)
+        {
+            if (rowKey == searchKey)
+                return 2;
+            if (rowKey.Contains(searchKey, StringComparison.Ordinal) || searchKey.Contains(rowKey, StringComparison.Ordinal))
+                return 1;
+        }
+
         return rowName.Contains(itemName, StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+    }
+
+    private static string NormalizeShopNameKey(string name)
+    {
+        var key = new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+        return key.EndsWith('s') && key.Length > 3 ? key[..^1] : key;
     }
 
     private static bool IsBetterTieBreak(uint itemId, uint rowItemId, int sealCostHint, uint rowSealCost, GCScripShopItem currentBest)

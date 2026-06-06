@@ -51,6 +51,13 @@ public sealed class FarmController : IDisposable
         "SelectString",
     ];
     private static readonly string[] SelectYesnoAddons = ["SelectYesno", "SelectYesNo"];
+    private static readonly InventoryType[] NormalInventoryTypes =
+    [
+        InventoryType.Inventory1,
+        InventoryType.Inventory2,
+        InventoryType.Inventory3,
+        InventoryType.Inventory4,
+    ];
 
     private static readonly uint[][] GcZoneIds =
     [
@@ -135,7 +142,7 @@ public sealed class FarmController : IDisposable
     private static readonly Vector3[] GcOfficerPos =
     [
         new(95.68933f, 40.250282f, 74.54028f),
-        new(-72.3f, -1.0f, -14.1f),
+        new(-67f, -0.5f, -8f),
         new(-141f, 4f, -106f),
     ];
     /// <summary>Navmesh-safe staging on the Y≈40 walkway before walking to GC NPCs.</summary>
@@ -144,7 +151,7 @@ public sealed class FarmController : IDisposable
     private static readonly Vector3[] GcShopPos =
     [
         new(93.0f, 40.0f, 72.0f),
-        new(-74.5f, -1.0f, -12.0f),
+        new(-67f, -0.5f, -8f),
         new(-141f, 4f, -106f),
     ];
     private static readonly string[] GcOfficerName =
@@ -221,6 +228,7 @@ public sealed class FarmController : IDisposable
     private bool      _deliveryBlockedByCap;
     private DateTime? _deliveryListLostAt;
     private DateTime? _pendingHandinSince;
+    private bool      _gcShopRankSelected;
     private bool      _gcShopCategorySelected;
     private Vector3   _gcNavDest;
     private string    _gcNavNpcName = string.Empty;
@@ -256,6 +264,8 @@ public sealed class FarmController : IDisposable
     private bool _shopTestMode;
     private bool _extractTestMode;
     private int _buyListIndex;
+    private GcShopBuyEntry? _oneShotBuyEntry;
+    private bool _oneShotBuyAttemptSent;
     private FarmState _extractReturnState = FarmState.StartDuty;
     private int _materializeCategory;
     private bool _materializeCategoryArmed;
@@ -270,6 +280,11 @@ public sealed class FarmController : IDisposable
     private DateTime _dutySupportLastActionUtc;
     private bool _adsNeedsStartInside;
     private DateTime _autoDutyStoppedAt = DateTime.MinValue;
+    private bool _pendingKingcakeDesynthStats;
+    private DateTime _kingcakeDesynthStartedUtc;
+    private DateTime? _kingcakeDesynthConsumedUtc;
+    private int _kingcakeDesynthStartCount;
+    private Dictionary<uint, int> _kingcakeDesynthStartDropCounts = new();
     private const int DutyExitTimeoutMs = 90_000;
     private string?   _lastStatusLogMessage;
     private DateTime  _lastStatusLogAt;
@@ -316,6 +331,8 @@ public sealed class FarmController : IDisposable
         _deliveryFinishing = false; _expectNpcMenu = false;
         _automationOwnsGcPersonnelUi = false;
         _repairTestMode = false; _deliveryTestMode = false; _shopTestMode = false; _extractTestMode = false;
+        _oneShotBuyEntry = null;
+        _oneShotBuyAttemptSent = false;
         _adsRepairAttemptedBeforeDuty = false;
         _adsLeaveRequestedForFinalRun = false;
         _lastAdsCombatRefreshUtc = DateTime.MinValue;
@@ -395,12 +412,61 @@ public sealed class FarmController : IDisposable
         _extractTestMode = false;
         _gcInitialSpend = false;
         _buyListIndex = 0;
+        _gcShopRankSelected = false;
         _gcShopCategorySelected = false;
         IsRunning = true;
         LastError = null;
         StartTime = DateTime.Now;
         _currentTask = null;
         Log("GC shop test — navigating to quartermaster...");
+        BeginGcNavigation(FarmState.OpenGCShop);
+    }
+
+    public void StartKingcakeBuyTest()
+    {
+        if (IsRunning && !_shopTestMode)
+        {
+            Log("Cannot start Kingcake buy test while farm is running — stop the farm first");
+            return;
+        }
+
+        if (!IpcManager.VnavAvailable)
+        {
+            SetError("vnavmesh IPC not available");
+            return;
+        }
+
+        if (!IpcManager.LifestreamAvailable)
+        {
+            SetError("Lifestream IPC not available");
+            return;
+        }
+
+        _shopTestMode = true;
+        _deliveryTestMode = false;
+        _repairTestMode = false;
+        _extractTestMode = false;
+        _gcInitialSpend = false;
+        _buyListIndex = 0;
+        _gcShopRankSelected = false;
+        _gcShopCategorySelected = false;
+        _oneShotBuyEntry = new GcShopBuyEntry
+        {
+            Enabled = true,
+            ItemName = "Kingcake",
+            ItemId = 13595,
+            SealCost = 5000,
+            CategoryTab = GcShopCategoryResolver.TabMateriel,
+            RankTab = 2,
+            ListRow = -1,
+            BuyQtyPerPurchase = 1,
+        };
+        _oneShotBuyAttemptSent = false;
+        IsRunning = true;
+        LastError = null;
+        StartTime = DateTime.Now;
+        _currentTask = null;
+        Log("One-shot Kingcake buy test — navigating to quartermaster...");
         BeginGcNavigation(FarmState.OpenGCShop);
     }
 
@@ -491,6 +557,8 @@ public sealed class FarmController : IDisposable
         _deliveryTestMode = false;
         _shopTestMode = false;
         _extractTestMode = false;
+        _oneShotBuyEntry = null;
+        _oneShotBuyAttemptSent = false;
         _automationOwnsGcPersonnelUi = false;
         ResetMateriaExtractionState();
         ResetDutySupportQueueState();
@@ -517,6 +585,7 @@ public sealed class FarmController : IDisposable
             return;
         }
 
+        PollKingcakeDesynthResult();
         TryDismissStuckOfficerMenuTick();
 
         if (!IsRunning) return;
@@ -867,6 +936,7 @@ public sealed class FarmController : IDisposable
 
                 if (CanAffordDuckbone())
                 {
+                    _gcShopRankSelected = false;
                     _gcShopCategorySelected = false;
                     _buyListIndex = 0;
                     BeginGcNavigation(FarmState.OpenGCShop);
@@ -950,7 +1020,10 @@ public sealed class FarmController : IDisposable
     {
         _shopTestMode = false;
         _automationOwnsGcPersonnelUi = false;
+        _oneShotBuyEntry = null;
+        _oneShotBuyAttemptSent = false;
         _buyListIndex = 0;
+        _gcShopRankSelected = false;
         _gcShopCategorySelected = false;
         ResetBuyAttempt();
         _buyPhaseSince = null;
@@ -1016,6 +1089,8 @@ public sealed class FarmController : IDisposable
 
     private const float NpcInteractRange = 3.25f;
     private const float NpcApproachRange = 3.0f;
+    private const float RepairNpcApproachRange = 1.6f;
+    private const float GenericRepairReturnReconnectRadius = 40f;
     private static readonly Random _rng = new();
 
     private static int Jitter(int baseMs, int rangeMs = 100)
@@ -1035,24 +1110,7 @@ public sealed class FarmController : IDisposable
         if (repairPath.Length > 0)
         {
             await StatusAsync("Navigating to repair mender (vnav)...");
-            foreach (var point in repairPath)
-            {
-                if (!IsRunning)
-                    return;
-
-                if (IsAddonVisible("Repair"))
-                {
-                    await LogAsync("Repair window open — stopping approach nav");
-                    break;
-                }
-
-                await LogAsync($"Repair vnav → {point}...");
-                if (!await PathfindToPointAsync(point, MappedStepArriveRange, GcWaypointTimeoutMs))
-                    await LogAsync($"WARN: repair vnav to {point} failed or timed out");
-
-                IpcManager.VnavStop();
-                await Task.Delay(100);
-            }
+            await WalkHumanizedRouteAsync(repairPath, reverse: false, "Repair", preventBacktrack: true);
 
             if (!IsRunning)
                 return;
@@ -1079,11 +1137,13 @@ public sealed class FarmController : IDisposable
             return;
         }
 
-        var dist = await GetPlayerDistToAsync(menderPos);
-        if (dist.HasValue && dist.Value > NpcInteractRange)
+        var approachPos = await Service.Framework.RunOnFrameworkThread(() =>
+            FindNpcByName(menderName, menderPos, 80f)?.Position ?? menderPos);
+        var dist = await GetPlayerDistToAsync(approachPos);
+        if (dist.HasValue && dist.Value > RepairNpcApproachRange)
         {
             await LogAsync($"Short vnav to {menderName} ({dist.Value:F1}y away)...");
-            await PathfindToPointAsync(menderPos, NpcInteractRange, 30_000);
+            await PathfindToPointAsync(approachPos, RepairNpcApproachRange, 30_000);
             IpcManager.VnavStop();
             await WaitForMovementStopAsync(500);
         }
@@ -1145,18 +1205,7 @@ public sealed class FarmController : IDisposable
         if (returnPath.Length > 0)
         {
             await StatusAsync("Walking back from mender...");
-            foreach (var point in returnPath)
-            {
-                if (!IsRunning)
-                    return;
-
-                await LogAsync($"Return vnav → {point}...");
-                if (!await PathfindToPointAsync(point, MappedStepArriveRange, GcWaypointTimeoutMs))
-                    await LogAsync($"WARN: return vnav to {point} failed or timed out");
-
-                IpcManager.VnavStop();
-                await Task.Delay(100);
-            }
+            await WalkHumanizedRouteAsync(returnPath, reverse: false, "Repair return", preventBacktrack: true);
         }
 
         if (gcIdx == 0 && IsRunning)
@@ -1601,11 +1650,14 @@ public sealed class FarmController : IDisposable
 
     private async Task PathfindGenericGcMappedAsync(int gcIdx, Vector3 dest, string npcName)
     {
+        if (await TryReconnectFromGenericRepairReturnAsync(gcIdx, dest, npcName))
+            return;
+
         var approach = GcNavRoutes.GetGcApproachPath(Plugin.Config, gcIdx);
         if (approach.Length > 0)
         {
             await LogAsync($"GC approach route ({approach.Length} steps, humanized)...");
-            await WalkHumanizedRouteAsync(approach, reverse: false, "GC");
+            await WalkHumanizedRouteAsync(approach, reverse: false, "GC", preventBacktrack: true);
         }
 
         if (!IsRunning)
@@ -1620,6 +1672,42 @@ public sealed class FarmController : IDisposable
 
         if (IsRunning && GcNavRoutes.HasGcApproachRoute(Plugin.Config, gcIdx))
             await ApproachGcTargetAfterUpperRouteAsync(dest, npcName);
+    }
+
+    private async Task<bool> TryReconnectFromGenericRepairReturnAsync(int gcIdx, Vector3 dest, string npcName)
+    {
+        if (gcIdx == 0 || !GcNavRoutes.HasRepairReturnRoute(Plugin.Config, gcIdx))
+            return false;
+
+        var ctx = await Service.Framework.RunOnFrameworkThread(() =>
+        {
+            var player = Service.ObjectTable.LocalPlayer;
+            if (player == null)
+                return (useReturn: false, returnDist: float.MaxValue, approachDist: float.MaxValue);
+
+            var pos = player.Position;
+            var returnPath = GcNavRoutes.GetRepairReturnPath(Plugin.Config, gcIdx);
+            var approach = GcNavRoutes.GetGcApproachPath(Plugin.Config, gcIdx);
+            var returnDist = FindNearestRouteDistance(returnPath, pos);
+            var approachDist = FindNearestRouteDistance(approach, pos);
+            var useReturn = returnPath.Length > 0
+                            && returnDist <= GenericRepairReturnReconnectRadius
+                            && returnDist + 5f < approachDist;
+            return (useReturn, returnDist, approachDist);
+        });
+
+        if (!ctx.useReturn)
+            return false;
+
+        var returnRoute = GcNavRoutes.GetRepairReturnPath(Plugin.Config, gcIdx);
+        await LogAsync(
+            $"GC reconnect — near repair return route ({ctx.returnDist:F0}y, approach {ctx.approachDist:F0}y); walking back toward GC...");
+        await WalkHumanizedRouteAsync(returnRoute, reverse: false, "GC repair return", preventBacktrack: true);
+        if (!IsRunning)
+            return true;
+
+        await ApproachGcTargetAfterUpperRouteAsync(dest, npcName);
+        return true;
     }
 
     private async Task<bool> EnsureMaelstromGcStagingHubAsync(Vector3 dest, string npcName)
@@ -2182,6 +2270,18 @@ public sealed class FarmController : IDisposable
         }
 
         return best;
+    }
+
+    private static float FindNearestRouteDistance(IReadOnlyList<Vector3> steps, Vector3 pos)
+    {
+        if (steps.Count == 0)
+            return float.MaxValue;
+
+        var bestDist = float.MaxValue;
+        foreach (var step in steps)
+            bestDist = Math.Min(bestDist, RoutePointDistance(pos, step));
+
+        return bestDist;
     }
 
     private async Task WalkMappedRouteAsync(Vector3[] points) =>
@@ -2763,6 +2863,7 @@ public sealed class FarmController : IDisposable
 
         if (_deliveryBlockedByCap && ShouldSpendSealsOnShop())
         {
+            _gcShopRankSelected = false;
             _gcShopCategorySelected = false;
             _buyAwaitingConfirm = false;
             _buyListIndex = 0;
@@ -3986,6 +4087,12 @@ public sealed class FarmController : IDisposable
                     TotalDuckbones += _buyLastQty;
                 Log($"Bought {_buyLastQty}x '{_buyLastItemLabel}' | Seals: {GetCurrentSeals()}");
                 ResetBuyAttempt();
+                if (_oneShotBuyEntry != null)
+                {
+                    Log("One-shot Kingcake buy test complete.");
+                    FinishBuying();
+                    return;
+                }
             }
             ThrottleGcAction(300);
 
@@ -4012,6 +4119,11 @@ public sealed class FarmController : IDisposable
                 Log("WARN: GC shop quantity dialog timed out — closing exchange dialogs");
                 CloseBuyConfirmDialogs();
                 ResetBuyAttempt();
+                if (_oneShotBuyEntry != null)
+                {
+                    FinishBuying();
+                    return;
+                }
                 if (!NeedsMoreOfShopEntry(entry))
                     AdvanceShopBuyEntry();
             }
@@ -4026,6 +4138,11 @@ public sealed class FarmController : IDisposable
                 Log("WARN: GC shop purchase confirm timed out — resetting");
                 CloseBuyConfirmDialogs();
                 ResetBuyAttempt();
+                if (_oneShotBuyEntry != null)
+                {
+                    FinishBuying();
+                    return;
+                }
                 if (!NeedsMoreOfShopEntry(entry))
                     AdvanceShopBuyEntry();
             }
@@ -4038,14 +4155,26 @@ public sealed class FarmController : IDisposable
             return;
         }
 
+        ResolveGcExchangeTabs(
+            entry.CategoryTab, entry.RankTab, entry.ItemName, ResolveShopItemId(entry),
+            out var rankCallback, out var categoryCallback, out var uiRankTab, out var uiCategoryTab, out var sheetTabsResolved);
+
+        if (!_gcShopRankSelected)
+        {
+            SelectGcExchangeRankOnly(rankCallback, uiRankTab);
+            _gcShopRankSelected = true;
+            _gcShopCategorySelected = false;
+            Log($"Selected GC exchange rank tab {uiRankTab} for '{entry.ItemName}'");
+            ThrottleGcAction(700);
+            return;
+        }
+
         if (!_gcShopCategorySelected)
         {
-            SelectGcExchangeTabs(
-                entry.CategoryTab, entry.RankTab, entry.ItemName, ResolveShopItemId(entry),
-                out var uiRankTab, out var uiCategoryTab);
+            SelectGcExchangeCategoryOnly(categoryCallback, uiCategoryTab, sheetTabsResolved);
             _gcShopCategorySelected = true;
-            Log($"Selected GC exchange rank tab {uiRankTab}, category tab {uiCategoryTab} for '{entry.ItemName}'");
-            ThrottleGcAction(500);
+            Log($"Selected GC exchange category tab {uiCategoryTab} for '{entry.ItemName}'");
+            ThrottleGcAction(700);
             return;
         }
 
@@ -4061,6 +4190,7 @@ public sealed class FarmController : IDisposable
             if (shopInfo.SealCost > 0)
                 expectedSealCost = shopInfo.SealCost;
             sheetListRow = shopInfo.SheetListRow;
+            Log($"Resolved '{entry.ItemName}' from sheets — item {resolvedItemId}, cost {expectedSealCost}, rank callback {shopInfo.RankCallback}, category callback {shopInfo.CategoryCallback}, UI tab {shopInfo.UiCategoryTab}, row {sheetListRow}");
         }
 
         var maxAffordable = GetMaxAffordableForEntry(entry, expectedSealCost);
@@ -4091,6 +4221,13 @@ public sealed class FarmController : IDisposable
 
         if (row < 0)
         {
+            if (_oneShotBuyEntry != null)
+            {
+                Log("WARN: One-shot Kingcake buy test could not find Kingcake — closing exchange");
+                FinishBuying();
+                return;
+            }
+
             _buyFindItemFailures++;
             if (_buyFindItemFailures >= BuyFindItemMaxFailures)
             {
@@ -4100,6 +4237,7 @@ public sealed class FarmController : IDisposable
             }
 
             Log($"WARN: Could not find '{entry.ItemName}' in list — will retry ({_buyFindItemFailures}/{BuyFindItemMaxFailures})");
+            _gcShopRankSelected = false;
             _gcShopCategorySelected = false;
             ThrottleGcAction(300);
             return;
@@ -4109,15 +4247,34 @@ public sealed class FarmController : IDisposable
         {
             Log($"WARN: Row {row} shows '{itemLabel}', expected '{entry.ItemName}' — refusing purchase ({rowSource})");
             _buyFindItemFailures++;
+            _gcShopRankSelected = false;
             _gcShopCategorySelected = false;
             ThrottleGcAction(300);
             return;
         }
 
         _buyFindItemFailures = 0;
-        HighlightGcExchangeRow(row);
-        SendCallback(GcExchangeAddon, false, 0, 0, row, qty, 0, true, false);
+        if (_oneShotBuyEntry != null)
+        {
+            if (!TryOpenGcExchangeBuyDialog(row, qty))
+            {
+                Log($"WARN: One-shot Kingcake buy test could not open buy dialog for row {row}");
+                FinishBuying();
+                return;
+            }
+        }
+        else if (!TryOpenGcExchangeBuyDialog(row, qty))
+        {
+            Log($"WARN: Could not open buy dialog for '{itemLabel}' at row {row}");
+            _buyFindItemFailures++;
+            _gcShopRankSelected = false;
+            _gcShopCategorySelected = false;
+            ThrottleGcAction(300);
+            return;
+        }
+
         _buyAwaitingConfirm = true;
+        _oneShotBuyAttemptSent = _oneShotBuyEntry != null;
         _buyPendingQty = qty;
         _buyLastQty = qty;
         _buyLastItemLabel = itemLabel;
@@ -4129,6 +4286,9 @@ public sealed class FarmController : IDisposable
 
     private GcShopBuyEntry? GetActiveShopBuyEntry()
     {
+        if (_oneShotBuyEntry != null)
+            return _oneShotBuyAttemptSent && !_buyAwaitingConfirm ? null : _oneShotBuyEntry;
+
         var list = Plugin.Config.EnabledGcShopBuyList();
         while (_buyListIndex < list.Count)
         {
@@ -4137,6 +4297,7 @@ public sealed class FarmController : IDisposable
             {
                 Log(rankSkipReason);
                 _buyListIndex++;
+                _gcShopRankSelected = false;
                 _gcShopCategorySelected = false;
                 _buyFindItemFailures = 0;
                 continue;
@@ -4146,6 +4307,7 @@ public sealed class FarmController : IDisposable
                 return entry;
 
             _buyListIndex++;
+            _gcShopRankSelected = false;
             _gcShopCategorySelected = false;
             _buyFindItemFailures = 0;
         }
@@ -4171,6 +4333,7 @@ public sealed class FarmController : IDisposable
     private void AdvanceShopBuyEntry()
     {
         _buyListIndex++;
+        _gcShopRankSelected = false;
         _gcShopCategorySelected = false;
         _buyFindItemFailures = 0;
         ResetBuyAttempt();
@@ -4219,6 +4382,38 @@ public sealed class FarmController : IDisposable
 
     private static bool CanAffordDuckbone() => ShouldSpendSealsOnShop();
 
+    public static int GetKingcakeInventoryCount() => GetInventoryItemCount(KingcakeDesynth.KingcakeItemId);
+
+    public bool TryStartKingcakeDesynth(out string message)
+    {
+        if (IsRunning)
+        {
+            message = "Stop the farm before desynthing Kingcakes.";
+            return false;
+        }
+
+        var count = GetKingcakeInventoryCount();
+        if (count <= 0)
+        {
+            message = "No Kingcakes found in inventory.";
+            return false;
+        }
+
+        if (!TryDesynthFirstKingcake())
+        {
+            message = "Could not start Kingcake desynth safely. Open your inventory and make sure a Kingcake is in a normal inventory slot.";
+            return false;
+        }
+
+        _pendingKingcakeDesynthStats = true;
+        _kingcakeDesynthStartedUtc = DateTime.UtcNow;
+        _kingcakeDesynthConsumedUtc = null;
+        _kingcakeDesynthStartCount = count;
+        _kingcakeDesynthStartDropCounts = SnapshotKingcakeDropCounts();
+        message = $"Started Kingcake desynth for item {KingcakeDesynth.KingcakeItemId}. Confirm the in-game prompt if one appears.";
+        return true;
+    }
+
     private static int GetInventoryItemCount(uint itemId)
     {
         if (itemId == 0)
@@ -4231,14 +4426,138 @@ public sealed class FarmController : IDisposable
         }
     }
 
+    private static unsafe bool TryDesynthFirstKingcake()
+    {
+        var agent = AgentSalvage.Instance();
+        var inv = InventoryManager.Instance();
+        if (agent == null || inv == null)
+            return false;
+
+        foreach (var inventoryType in NormalInventoryTypes)
+        {
+            var container = inv->GetInventoryContainer(inventoryType);
+            if (container == null)
+                continue;
+
+            for (var slot = 0; slot < container->Size; slot++)
+            {
+                var item = container->GetInventorySlot(slot);
+                if (item == null || item->ItemId != KingcakeDesynth.KingcakeItemId)
+                    continue;
+
+                agent->SalvageItem(item);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static List<uint> ExpandSalvageResults(Span<SalvageResult> results)
+    {
+        var drops = new List<uint>();
+        foreach (var result in results)
+        {
+            if (result.ItemId == 0 || result.Quantity <= 0)
+                continue;
+
+            var drop = KingcakeDesynth.FindDrop(result.ItemId);
+            if (drop == null)
+                continue;
+
+            for (var i = 0; i < result.Quantity; i++)
+                drops.Add(result.ItemId);
+        }
+
+        return drops;
+    }
+
+    private unsafe void PollKingcakeDesynthResult()
+    {
+        if (!_pendingKingcakeDesynthStats)
+            return;
+
+        if (DateTime.UtcNow - _kingcakeDesynthStartedUtc > TimeSpan.FromSeconds(90))
+        {
+            _pendingKingcakeDesynthStats = false;
+            Log("Kingcake desynth result tracking timed out.");
+            return;
+        }
+
+        var agent = AgentSalvage.Instance();
+        var drops = agent != null && agent->IsSalvageResultAddonOpen
+            ? ExpandSalvageResults(agent->DesynthResults)
+            : [];
+
+        if (drops.Count > 0)
+        {
+            RecordPendingKingcakeDesynth(drops);
+            return;
+        }
+
+        var currentCount = GetKingcakeInventoryCount();
+        if (currentCount >= _kingcakeDesynthStartCount)
+            return;
+
+        _kingcakeDesynthConsumedUtc ??= DateTime.UtcNow;
+        if (DateTime.UtcNow - _kingcakeDesynthConsumedUtc.Value < TimeSpan.FromSeconds(5))
+            return;
+
+        var inventoryDrops = GetKingcakeDropInventoryDeltas();
+        RecordPendingKingcakeDesynth(inventoryDrops);
+        Log(inventoryDrops.Count > 0
+            ? $"Recorded Kingcake desynth stats from inventory deltas ({inventoryDrops.Count} drop item(s))."
+            : "Recorded Kingcake desynth stats from inventory consumption; drop result was not available.");
+    }
+
+    private void RecordPendingKingcakeDesynth(IEnumerable<uint> drops)
+    {
+        var dropList = drops.ToArray();
+        DesynthTracker.RecordKingcakeDesynth(dropList);
+        _pendingKingcakeDesynthStats = false;
+        _kingcakeDesynthConsumedUtc = null;
+        _kingcakeDesynthStartCount = 0;
+        _kingcakeDesynthStartDropCounts.Clear();
+        Log($"Recorded Kingcake desynth stats ({dropList.Length} drop item(s)).");
+    }
+
+    private static Dictionary<uint, int> SnapshotKingcakeDropCounts()
+    {
+        var counts = new Dictionary<uint, int>();
+        foreach (var drop in KingcakeDesynth.Drops)
+            counts[drop.ItemId] = GetInventoryItemCount(drop.ItemId);
+        return counts;
+    }
+
+    private List<uint> GetKingcakeDropInventoryDeltas()
+    {
+        var drops = new List<uint>();
+        foreach (var drop in KingcakeDesynth.Drops)
+        {
+            var before = _kingcakeDesynthStartDropCounts.GetValueOrDefault(drop.ItemId);
+            var after = GetInventoryItemCount(drop.ItemId);
+            for (var i = 0; i < Math.Max(0, after - before); i++)
+                drops.Add(drop.ItemId);
+        }
+
+        return drops;
+    }
+
     private static uint ResolveShopItemId(GcShopBuyEntry entry)
     {
         if (entry.ItemId != 0)
             return entry.ItemId;
 
+        var entryKey = NormalizeShopSearchKey(entry.ItemName);
+        if (entryKey.EndsWith('s') && entryKey.Length > 3)
+            entryKey = entryKey[..^1];
+
         foreach (var row in Service.DataManager.GetExcelSheet<Item>())
         {
-            if (row.Name.ExtractText().Equals(entry.ItemName, StringComparison.OrdinalIgnoreCase))
+            var rowName = row.Name.ExtractText();
+            var rowKey = NormalizeShopSearchKey(rowName);
+            if (rowName.Equals(entry.ItemName, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrWhiteSpace(entryKey) && entryKey == rowKey))
                 return row.RowId;
         }
 
@@ -4276,6 +4595,7 @@ public sealed class FarmController : IDisposable
         ResetBuyAttempt();
         _buyPhaseSince = null;
         _buyFindItemFailures = 0;
+        _gcShopRankSelected = false;
         _gcShopCategorySelected = false;
         _buyListIndex = 0;
         _pendingHandinRow = -1;
@@ -4299,18 +4619,23 @@ public sealed class FarmController : IDisposable
         return null;
     }
 
-    private static unsafe void SelectGcExchangeTabs(
-        int categoryTab, int rankTab, string itemName, uint itemId, out int uiRankTab, out int uiCategoryTab)
+    private static void ResolveGcExchangeTabs(
+        int categoryTab,
+        int rankTab,
+        string itemName,
+        uint itemId,
+        out int rankCallback,
+        out int categoryCallback,
+        out int uiRankTab,
+        out int uiCategoryTab,
+        out bool sheetResolved)
     {
+        rankCallback = rankTab;
+        categoryCallback = categoryTab;
         uiRankTab = rankTab;
         uiCategoryTab = categoryTab;
+        sheetResolved = GcExchangeItemResolver.TryResolve(itemName, itemId, 0, out var shopInfo);
 
-        var addon = Service.GameGui.GetAddonByName<AtkUnitBase>(GcExchangeAddon);
-        if (addon == null || !addon->IsVisible) return;
-
-        var rankCallback = rankTab;
-        var categoryCallback = categoryTab;
-        var sheetResolved = GcExchangeItemResolver.TryResolve(itemName, itemId, 0, out var shopInfo);
         if (sheetResolved)
         {
             rankCallback = shopInfo.RankCallback;
@@ -4321,9 +4646,23 @@ public sealed class FarmController : IDisposable
         }
         else
             Log($"GC exchange tabs from config — rank {rankTab}, category UI tab {categoryTab} (sheet lookup missed '{itemName}')");
+    }
+
+    private static unsafe void SelectGcExchangeRankOnly(int rankCallback, int uiRankTab)
+    {
+        var addon = Service.GameGui.GetAddonByName<AtkUnitBase>(GcExchangeAddon);
+        if (addon == null || !addon->IsVisible)
+            return;
 
         SelectGcExchangeRank(addon, uiRankTab);
         SendCallback(GcExchangeAddon, true, 1, rankCallback);
+    }
+
+    private static unsafe void SelectGcExchangeCategoryOnly(int categoryCallback, int uiCategoryTab, bool sheetResolved)
+    {
+        var addon = Service.GameGui.GetAddonByName<AtkUnitBase>(GcExchangeAddon);
+        if (addon == null || !addon->IsVisible)
+            return;
 
         SelectGcExchangeCategory(addon, uiCategoryTab, categoryCallback, sendCategoryCallback: sheetResolved);
     }
@@ -4581,15 +4920,37 @@ public sealed class FarmController : IDisposable
         if (addon == null || !addon->IsVisible) return;
 
         var list = GetGcExchangeList(addon);
-        if (list != null && row >= 0 && row < list->ListLength)
+        if (list != null && row >= 0)
         {
             list->ScrollToItem((short)row);
             list->UpdateListItems();
-            list->SelectItem(row, dispatchEvent: false);
-            list->SetItemHighlightedState(row, highlighted: true, triggerUpdate: true);
+            if (row < list->ListLength)
+            {
+                list->SelectItem(row, dispatchEvent: false);
+                list->SetItemHighlightedState(row, highlighted: true, triggerUpdate: true);
+            }
         }
 
         SendCallback(GcExchangeAddon, true, 0, row);
+    }
+
+    private static unsafe bool TryOpenGcExchangeBuyDialog(int row, int qty)
+    {
+        var addon = Service.GameGui.GetAddonByName<AtkUnitBase>(GcExchangeAddon);
+        if (addon == null || !addon->IsVisible || row < 0)
+            return false;
+
+        var list = GetGcExchangeList(addon);
+        if (list == null)
+            return false;
+
+        list->ScrollToItem((short)row);
+        list->UpdateListItems();
+        list->SelectItem(row, dispatchEvent: false);
+        list->SetItemHighlightedState(row, highlighted: true, triggerUpdate: true);
+        list->SelectItem(row, dispatchEvent: true);
+        SendCallback(GcExchangeAddon, false, 0, row, Math.Max(1, qty), 0, true, false);
+        return true;
     }
 
     private static unsafe (int Row, string ItemLabel, string Source) FindGcExchangeItemRow(
@@ -4704,7 +5065,7 @@ public sealed class FarmController : IDisposable
 
     private static unsafe string ReadExchangeRowLabelAfterScroll(AtkUnitBase* addon, AtkComponentList* list, int row)
     {
-        if (list != null && row >= 0 && row < list->ListLength)
+        if (list != null && row >= 0)
         {
             list->ScrollToItem((short)row);
             list->UpdateListItems();

@@ -42,6 +42,13 @@ public sealed class MainWindow : Window, IDisposable
     private int _catalogCategoryFilter = 4;
     private string _catalogSearch = string.Empty;
     private int _catalogAddIndex;
+    private Dictionary<uint, MarketItemData>? _desynthPrices;
+    private Task<Dictionary<uint, MarketItemData>?>? _desynthPriceTask;
+    private DateTime? _desynthPricesUpdatedAt;
+    private string? _desynthPriceError;
+    private string _desynthStatus = "Idle";
+    private bool _confirmResetDesynthStats;
+    private string? _desynthExportStatus;
     private readonly IFontHandle? _bannerTitleFont;
 
     private static string GetWindowTitle() =>
@@ -109,6 +116,18 @@ public sealed class MainWindow : Window, IDisposable
             if (ImGui.BeginTabItem("Buy List"))
             {
                 DrawBuyListTab(cfg);
+                ImGui.EndTabItem();
+            }
+
+            if (ImGui.BeginTabItem("Desynth"))
+            {
+                DrawDesynthTab(cfg);
+                ImGui.EndTabItem();
+            }
+
+            if (ImGui.BeginTabItem("Stats"))
+            {
+                DrawStatsTab(cfg);
                 ImGui.EndTabItem();
             }
 
@@ -317,6 +336,369 @@ public sealed class MainWindow : Window, IDisposable
 
     private static string FormatCatalogLabel(GcShopCatalogEntry entry) =>
         $"{entry.ItemName} ({entry.SealCost} seals) — {GcShopCatalog.CategoryName(entry.CategoryTab)}";
+
+    private void DrawDesynthTab(Configuration cfg)
+    {
+        cfg.EnsureDesynthDefaults();
+        CompleteDesynthPriceFetch();
+
+        ImGui.TextColored(ColGray, "Kingcake desynthesis EV");
+        ImGui.TextDisabled("Prices: Universalis public API, Maduin. Offline/fallback values are used when live prices are missing.");
+
+        ImGui.Spacing();
+        DrawDesynthPriceFetchSection();
+        ImGui.Separator();
+        DrawKingcakeDesynthButton();
+        ImGui.Separator();
+        DrawDesynthDropTable(cfg);
+        ImGui.Separator();
+        DrawDesynthProjections(cfg);
+        ImGui.Separator();
+        DrawDesynthAlertsAndOverrides(cfg);
+    }
+
+    private void DrawDesynthPriceFetchSection()
+    {
+        var loading = _desynthPriceTask is { IsCompleted: false };
+        if (loading)
+            ImGui.BeginDisabled();
+
+        if (ImGui.Button("Refresh Maduin prices"))
+        {
+            _desynthPriceError = null;
+            _desynthPriceTask = UniversalisClient.FetchPricesAsync(KingcakeDesynth.MarketItemIds);
+        }
+
+        if (loading)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (loading)
+            ImGui.TextColored(ColYellow, "Loading...");
+        else if (_desynthPricesUpdatedAt.HasValue)
+            ImGui.TextDisabled($"Last updated: {_desynthPricesUpdatedAt.Value:g}");
+        else
+            ImGui.TextDisabled("Not fetched this session.");
+
+        if (!string.IsNullOrWhiteSpace(_desynthPriceError))
+            ImGui.TextColored(ColYellow, _desynthPriceError);
+
+        if (DateTime.UtcNow < UniversalisClient.RetryAfterUtc)
+            ImGui.TextColored(ColYellow, "Universalis rate limit hit; wait briefly before refreshing.");
+    }
+
+    private void CompleteDesynthPriceFetch()
+    {
+        if (_desynthPriceTask is not { IsCompleted: true } task)
+            return;
+
+        _desynthPriceTask = null;
+        if (task.IsFaulted)
+        {
+            _desynthPriceError = "Price fetch failed; using fallback/manual prices.";
+            return;
+        }
+
+        _desynthPrices = task.Result;
+        if (_desynthPrices == null || _desynthPrices.Count == 0)
+        {
+            _desynthPriceError = "No live prices returned; using fallback/manual prices.";
+            return;
+        }
+
+        _desynthPricesUpdatedAt = DateTime.Now;
+        _desynthPriceError = null;
+    }
+
+    private void DrawKingcakeDesynthButton()
+    {
+        var count = FarmController.GetKingcakeInventoryCount();
+        ImGui.TextColored(ColGray, $"Kingcakes in inventory: {count:N0}");
+        if (count <= 0 || Plugin.Controller.IsRunning)
+            ImGui.BeginDisabled();
+
+        if (ImGui.Button("Desynth Kingcake only"))
+        {
+            Plugin.Controller.TryStartKingcakeDesynth(out var message);
+            _desynthStatus = message;
+        }
+
+        if (count <= 0 || Plugin.Controller.IsRunning)
+            ImGui.EndDisabled();
+
+        if (Plugin.Controller.IsRunning)
+            ImGui.TextColored(ColYellow, "Stop the farm before desynthing.");
+
+        ImGui.TextWrapped(_desynthStatus);
+    }
+
+    private void DrawDesynthDropTable(Configuration cfg)
+    {
+        var ev = CalculateKingcakeEv(cfg);
+        ImGui.TextColored(ColGray, $"Expected value per Kingcake: {ev:N0} gil");
+        ImGui.TextDisabled($"Seal EV: {(ev / KingcakeDesynth.KingcakeSealsPerPurchase):N2} gil per seal");
+
+        if (!ImGui.BeginTable("##kingcakeDrops", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable))
+            return;
+
+        ImGui.TableSetupColumn("Item");
+        ImGui.TableSetupColumn("Drop %");
+        ImGui.TableSetupColumn("Price");
+        ImGui.TableSetupColumn("EV");
+        ImGui.TableSetupColumn("Source");
+        ImGui.TableHeadersRow();
+
+        foreach (var drop in KingcakeDesynth.Drops)
+        {
+            var price = ResolveDesynthPrice(cfg, drop, out var source);
+            var contribution = price * drop.DropRate;
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            ImGui.Text(drop.Name);
+            ImGui.TableNextColumn();
+            ImGui.Text($"{drop.DropRate:P2}");
+            ImGui.TableNextColumn();
+            ImGui.Text($"{price:N0}");
+            ImGui.TableNextColumn();
+            ImGui.Text($"{contribution:N0}");
+            ImGui.TableNextColumn();
+            ImGui.TextDisabled(source);
+        }
+
+        ImGui.EndTable();
+    }
+
+    private void DrawDesynthProjections(Configuration cfg)
+    {
+        var targetGil = cfg.DesynthTargetGil;
+        ImGui.SetNextItemWidth(140);
+        if (ImGui.InputInt("Target gil", ref targetGil, 100000, 1000000))
+        {
+            cfg.DesynthTargetGil = Math.Max(0, targetGil);
+            cfg.Save();
+        }
+
+        var cycles = cfg.DesynthCyclesPerDay;
+        ImGui.SetNextItemWidth(140);
+        if (ImGui.InputInt("Cycles per day", ref cycles, 1, 5))
+        {
+            cfg.DesynthCyclesPerDay = Math.Max(1, cycles);
+            cfg.Save();
+        }
+
+        var ev = CalculateKingcakeEv(cfg);
+        var currentSeals = FarmController.GetCurrentSeals();
+        var currentKingcakes = currentSeals / KingcakeDesynth.KingcakeSealsPerPurchase;
+        var currentCycleGil = currentKingcakes * ev;
+        var targetKingcakes = ev <= 0 ? 0 : (int)Math.Ceiling(cfg.DesynthTargetGil / ev);
+        var targetSeals = targetKingcakes * KingcakeDesynth.KingcakeSealsPerPurchase;
+
+        ImGui.TextDisabled($"Current seals can buy about {currentKingcakes:N0} Kingcake(s), EV {currentCycleGil:N0} gil.");
+        ImGui.TextDisabled($"Target needs about {targetKingcakes:N0} Kingcake(s), or {targetSeals:N0} seals.");
+        ImGui.TextDisabled($"Daily projected EV at {cfg.DesynthCyclesPerDay:N0} cycle(s): {(currentCycleGil * cfg.DesynthCyclesPerDay):N0} gil.");
+    }
+
+    private void DrawDesynthAlertsAndOverrides(Configuration cfg)
+    {
+        if (ImGui.CollapsingHeader("Price alerts", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            var enabled = cfg.MooglePriceAlertEnabled;
+            if (ImGui.Checkbox("Alert when Moogle Miniature is below threshold", ref enabled))
+            {
+                cfg.MooglePriceAlertEnabled = enabled;
+                cfg.Save();
+            }
+
+            var threshold = cfg.MooglePriceAlertThreshold;
+            ImGui.SetNextItemWidth(140);
+            if (ImGui.InputInt("Moogle Miniature threshold", ref threshold, 1000, 10000))
+            {
+                cfg.MooglePriceAlertThreshold = Math.Max(0, threshold);
+                cfg.Save();
+            }
+
+            var moogle = KingcakeDesynth.Drops.FirstOrDefault(d => d.Name == "Moogle Miniature");
+            if (moogle.ItemId != 0)
+            {
+                var price = ResolveDesynthPrice(cfg, moogle, out _);
+                if (cfg.MooglePriceAlertEnabled && price > 0 && price < cfg.MooglePriceAlertThreshold)
+                    ImGui.TextColored(ColYellow, $"Moogle Miniature is below threshold: {price:N0} gil.");
+            }
+        }
+
+        if (!ImGui.CollapsingHeader("Manual price overrides"))
+            return;
+
+        ImGui.TextDisabled("Enable an override to use that price instead of live Universalis/fallback data.");
+        foreach (var drop in KingcakeDesynth.Drops)
+        {
+            ImGui.PushID($"override-{drop.ItemId}");
+            var enabled = cfg.DesynthPriceOverrideEnabled.GetValueOrDefault(drop.ItemId);
+            if (ImGui.Checkbox("##enabled", ref enabled))
+            {
+                cfg.DesynthPriceOverrideEnabled[drop.ItemId] = enabled;
+                cfg.Save();
+            }
+
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(130);
+            var price = cfg.DesynthPriceOverrides.GetValueOrDefault(drop.ItemId, drop.FallbackPrice);
+            if (ImGui.InputInt(drop.Name, ref price, 100, 1000))
+            {
+                cfg.DesynthPriceOverrides[drop.ItemId] = Math.Max(0, price);
+                cfg.Save();
+            }
+            ImGui.PopID();
+        }
+    }
+
+    private void DrawStatsTab(Configuration cfg)
+    {
+        cfg.EnsureDesynthDefaults();
+        var stats = DesynthTracker.Stats;
+        var ev = CalculateKingcakeEv(cfg);
+
+        ImGui.TextColored(ColGray, "Kingcake desynth statistics");
+        ImGui.TextDisabled("Stats are persisted to DesynthStats.json in the SealBreaker plugin config folder.");
+        ImGui.Text($"Total Kingcakes desynthed: {stats.TotalKingcakesDesynthed:N0}");
+        ImGui.Text($"Observed total value: {CalculateObservedDesynthValue(cfg):N0} gil");
+        ImGui.Text($"Estimated EV/sample: {ev:N0} gil");
+        if (stats.FirstDesynth != default)
+            ImGui.TextDisabled($"First: {stats.FirstDesynth:g}   Last: {stats.LastDesynth:g}");
+
+        ImGui.Separator();
+        DrawDesynthStatsTable(cfg);
+        ImGui.Separator();
+        DrawDesynthConfidence(stats.TotalKingcakesDesynthed);
+        ImGui.Separator();
+        DrawDesynthStatsActions();
+    }
+
+    private void DrawDesynthStatsTable(Configuration cfg)
+    {
+        if (!ImGui.BeginTable("##desynthStats", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable))
+            return;
+
+        ImGui.TableSetupColumn("Item");
+        ImGui.TableSetupColumn("Count");
+        ImGui.TableSetupColumn("Observed");
+        ImGui.TableSetupColumn("Expected");
+        ImGui.TableSetupColumn("Value");
+        ImGui.TableHeadersRow();
+
+        foreach (var drop in KingcakeDesynth.Drops)
+        {
+            DesynthTracker.Stats.ItemStats.TryGetValue(drop.ItemId, out var stat);
+            var observed = DesynthTracker.ObservedRate(drop.ItemId);
+            var variance = observed - drop.DropRate;
+            var price = ResolveDesynthPrice(cfg, drop, out _);
+
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            ImGui.Text(drop.Name);
+            ImGui.TableNextColumn();
+            ImGui.Text($"{stat?.TimesObtained ?? 0:N0}");
+            ImGui.TableNextColumn();
+            ImGui.TextColored(VarianceColor(variance), $"{observed:P2}");
+            ImGui.TableNextColumn();
+            ImGui.Text($"{drop.DropRate:P2}");
+            ImGui.TableNextColumn();
+            ImGui.Text($"{(stat?.TimesObtained ?? 0) * price:N0}");
+        }
+
+        ImGui.EndTable();
+    }
+
+    private static void DrawDesynthConfidence(int sampleSize)
+    {
+        var label = sampleSize switch
+        {
+            >= 500 => "High confidence",
+            >= 100 => "Medium confidence",
+            >= 30 => "Low confidence",
+            _ => "Very low confidence",
+        };
+        var color = sampleSize >= 100 ? ColGreen : sampleSize >= 30 ? ColYellow : ColGray;
+        ImGui.TextColored(color, $"{label} ({sampleSize:N0} sample size)");
+    }
+
+    private void DrawDesynthStatsActions()
+    {
+        if (ImGui.Button("Export to CSV"))
+        {
+            _desynthExportStatus = DesynthTracker.ExportCsv()
+                ? $"Exported to {DesynthTracker.ExportPath}"
+                : "CSV export failed; check plugin log.";
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Reset Statistics"))
+            _confirmResetDesynthStats = true;
+
+        if (_confirmResetDesynthStats)
+        {
+            ImGui.TextColored(ColYellow, "Confirm reset? This clears local desynth stats.");
+            if (ImGui.Button("Confirm reset"))
+            {
+                DesynthTracker.Reset();
+                _confirmResetDesynthStats = false;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel reset"))
+                _confirmResetDesynthStats = false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_desynthExportStatus))
+            ImGui.TextWrapped(_desynthExportStatus);
+    }
+
+    private int ResolveDesynthPrice(Configuration cfg, DesynthDrop drop, out string source)
+    {
+        if (cfg.DesynthPriceOverrideEnabled.GetValueOrDefault(drop.ItemId)
+            && cfg.DesynthPriceOverrides.TryGetValue(drop.ItemId, out var overridePrice)
+            && overridePrice > 0)
+        {
+            source = "Manual";
+            return overridePrice;
+        }
+
+        if (_desynthPrices != null
+            && _desynthPrices.TryGetValue(drop.ItemId, out var market)
+            && market.LowestPrice > 0)
+        {
+            source = "Live";
+            return market.LowestPrice;
+        }
+
+        source = "Fallback";
+        return drop.FallbackPrice;
+    }
+
+    private double CalculateKingcakeEv(Configuration cfg)
+    {
+        var total = 0d;
+        foreach (var drop in KingcakeDesynth.Drops)
+            total += ResolveDesynthPrice(cfg, drop, out _) * drop.DropRate;
+        return total;
+    }
+
+    private double CalculateObservedDesynthValue(Configuration cfg)
+    {
+        var total = 0d;
+        foreach (var drop in KingcakeDesynth.Drops)
+        {
+            DesynthTracker.Stats.ItemStats.TryGetValue(drop.ItemId, out var stat);
+            total += (stat?.TimesObtained ?? 0) * ResolveDesynthPrice(cfg, drop, out _);
+        }
+        return total;
+    }
+
+    private static Vector4 VarianceColor(float variance)
+    {
+        if (Math.Abs(variance) < 0.02f)
+            return ColGray;
+        return variance > 0 ? ColGreen : ColYellow;
+    }
 
     private static void DrawConfigTab(Configuration cfg)
     {
@@ -630,8 +1012,11 @@ public sealed class MainWindow : Window, IDisposable
             DrawGcTownRepairSection(cfg, town, gcIdx);
             ImGui.Separator();
             DrawGcRouteSection(cfg, town, gcIdx, GcRouteKind.Repair);
-            ImGui.Separator();
-            DrawGcRouteSection(cfg, town, gcIdx, GcRouteKind.RepairReturn);
+            if (GcNavRoutes.BakedRepairReturnCount(gcIdx) > 0 || town.UseCustomRepairReturnNavWaypoints)
+            {
+                ImGui.Separator();
+                DrawGcRouteSection(cfg, town, gcIdx, GcRouteKind.RepairReturn);
+            }
         }
 
         if (ImGui.CollapsingHeader("GC navigation route", ImGuiTreeNodeFlags.DefaultOpen))
@@ -696,7 +1081,7 @@ public sealed class MainWindow : Window, IDisposable
             GcRouteKind.Approach => (
                 town.UseCustomGcNavWaypoints,
                 GcNavRoutes.BakedGcApproachCount(gcIdx),
-                gcIdx == 2 ? "Entry waypoints" : "Approach waypoints",
+                gcIdx == 0 ? "Approach waypoints" : "Entry waypoints",
                 gcIdx == 0
                     ? "Y=40 supply deck walk (after port-in). Skipped on main deck."
                     : "Walk from city arrival to GC staging area.",
@@ -1158,6 +1543,32 @@ public sealed class MainWindow : Window, IDisposable
         }
     }
 
+    private static void DrawKingcakeTestButton(FarmController ctrl)
+    {
+        var canRun = IpcManager.VnavAvailable
+                     && IpcManager.LifestreamAvailable
+                     && !ctrl.IsRunning;
+
+        if (!canRun)
+            ImGui.BeginDisabled();
+
+        if (ImGui.Button("Kingcake", new Vector2(100, 30)))
+            ctrl.StartKingcakeBuyTest();
+
+        if (!canRun)
+            ImGui.EndDisabled();
+
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            if (!IpcManager.VnavAvailable || !IpcManager.LifestreamAvailable)
+                ImGui.SetTooltip("Requires vnavmesh and Lifestream.");
+            else if (ctrl.IsRunning)
+                ImGui.SetTooltip("Stop the farm before running the one-shot Kingcake buy test.");
+            else
+                ImGui.SetTooltip("Navigate to the quartermaster and fire one attempt to buy 1 Kingcake.");
+        }
+    }
+
     private static void DrawRepairTestButton(FarmController ctrl)
     {
         var gcIdx = Plugin.Config.GrandCompanyIndex;
@@ -1271,6 +1682,10 @@ public sealed class MainWindow : Window, IDisposable
         DrawExpertDeliveryTestButton(ctrl);
         ImGui.SameLine();
         DrawShopTestButton(ctrl);
+
+        ImGui.Spacing();
+
+        DrawKingcakeTestButton(ctrl);
         ImGui.SameLine();
         DrawRepairTestButton(ctrl);
         ImGui.SameLine();
