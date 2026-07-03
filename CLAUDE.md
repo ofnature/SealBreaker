@@ -28,6 +28,7 @@ Dalamud plugin (C# / .NET 10, `AllowUnsafeBlocks`, FFXIVClientStructs) that auto
 - `SealBreaker/Windows/UiTheme.cs` — palette + style helpers (cards, chips, metric cells, solid buttons). Use these instead of raw `PushStyleColor` for new UI.
 
 Build: `dotnet build SealBreaker/SealBreaker.csproj` (Dalamud DLLs from `%APPDATA%\XIVLauncher\addon\Hooks\`, default `15.0.2.0`).
+**Always build both configurations** after changes: `-c Debug` (loaded in game as the dev plugin) **and** `-c Release` (ships in the release zip).
 
 **Encoding warning:** source files are UTF-8 without BOM and contain em-dashes/arrows. Do not round-trip them through PowerShell 5.1 `Get-Content`/`Set-Content` (ANSI default mangles them). Use targeted editor tools or .NET `[IO.File]` APIs with explicit UTF-8.
 
