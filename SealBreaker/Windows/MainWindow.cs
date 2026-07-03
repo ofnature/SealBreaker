@@ -765,6 +765,12 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("When enabled, SealBreaker closes the personnel officer prompt after delivery/shop automation.\nDisable to talk to the officer manually while the plugin is loaded.");
 
+        var openExpertTab = cfg.OpenExpertDeliveryTabDirectly;
+        if (ImGui.Checkbox("Open Expert Delivery tab directly", ref openExpertTab))
+        { cfg.OpenExpertDeliveryTabDirectly = openExpertTab; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("While the farm or a delivery test is running, the GC Delivery Missions window opens straight on the Expert Delivery tab (HaselTweaks-style).\nAutomatically inactive once the farm is stopped, so manual use is untouched.");
+
         ImGui.Spacing();
         if (ImGui.CollapsingHeader("Materia extraction"))
             DrawMateriaExtractionSection(cfg);

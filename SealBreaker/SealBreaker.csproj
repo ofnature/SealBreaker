@@ -13,9 +13,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PlatformTarget>x64</PlatformTarget>
     <!-- On each fix release: keep Version/AssemblyVersion/FileVersion identical four-part strings and increment build by 1. -->
-    <Version>1.0.0.90</Version>
-    <AssemblyVersion>1.0.0.90</AssemblyVersion>
-    <FileVersion>1.0.0.90</FileVersion>
+    <Version>1.0.0.91</Version>
+    <AssemblyVersion>1.0.0.91</AssemblyVersion>
+    <FileVersion>1.0.0.91</FileVersion>
   </PropertyGroup>
 
   <PropertyGroup>

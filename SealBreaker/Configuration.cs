@@ -192,6 +192,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>When false, the plugin never auto-closes the GC personnel officer menu unless the farm/test opened it and is still running cleanup.</summary>
     public bool AutoDismissGcOfficerMenu { get; set; } = true;
 
+    /// <summary>HaselTweaks-style: while farming or in a delivery test, the GC supply window opens directly on the Expert Delivery tab. Inactive when stopped.</summary>
+    public bool OpenExpertDeliveryTabDirectly { get; set; } = true;
+
     // ── Materia extraction ────────────────────────────────────
     public bool AutoExtractMateriaEnabled { get; set; } = false;
     public bool AutoExtractMateriaBetweenRuns { get; set; } = true;

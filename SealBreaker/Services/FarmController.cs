@@ -1,3 +1,5 @@
+using Dalamud.Game.Addon.Lifecycle;
+using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
@@ -306,8 +308,38 @@ public sealed class FarmController : IDisposable
     private const int DutySupportOpenRetryMs = 2_000;
     private const int DutySupportRegisterRetryMs = 10_000;
 
-    public FarmController()  => Service.Framework.Update += OnFrameworkUpdate;
-    public void Dispose()    { Service.Framework.Update -= OnFrameworkUpdate; IpcManager.VnavStop(); }
+    private readonly AddonLifecycleRegistration _addonLifecycle = new();
+
+    public FarmController()
+    {
+        Service.Framework.Update += OnFrameworkUpdate;
+        _addonLifecycle.Register(AddonEvent.PostSetup, "GrandCompanySupplyList", OnSupplyListPostSetup);
+    }
+
+    public void Dispose()
+    {
+        Service.Framework.Update -= OnFrameworkUpdate;
+        _addonLifecycle.Dispose();
+        IpcManager.VnavStop();
+    }
+
+    /// <summary>HaselTweaks-style Expert Deliveries tweak: flip the supply window to the Expert Delivery tab as it opens.
+    /// Only active while the farm or a test is running so manual use is untouched once stopped.</summary>
+    private unsafe void OnSupplyListPostSetup(AddonEvent type, AddonArgs args)
+    {
+        if (!Plugin.Config.OpenExpertDeliveryTabDirectly || !IsRunning)
+            return;
+
+        var addon = (AddonGrandCompanySupplyList*)args.Addon.Address;
+        if (addon == null || addon->SelectedTab == GcExpertDeliveryTab)
+            return;
+
+        var atk = (AtkUnitBase*)addon;
+        var evt = stackalloc AtkEvent[1];
+        *evt = default;
+        atk->ReceiveEvent(AtkEventType.ButtonClick, 4, evt);
+        Log("Supply window opened — switched straight to Expert Delivery tab");
+    }
 
     public void Start()
     {

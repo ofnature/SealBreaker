@@ -14,6 +14,7 @@ namespace SealBreaker;
 public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/sealbreaker";
+    private const string CommandAlias = "/seal";
 
     public static Configuration  Config     { get; private set; } = null!;
     public static FarmController Controller { get; private set; } = null!;
@@ -48,6 +49,10 @@ public sealed class Plugin : IDalamudPlugin
         {
             HelpMessage = "Open Seal Breaker window"
         });
+        Service.CommandManager.AddHandler(CommandAlias, new CommandInfo(OnCommand)
+        {
+            HelpMessage = "Open Seal Breaker window (short alias)"
+        });
 
         _pi.UiBuilder.Draw         += DrawUI;
         _pi.UiBuilder.OpenConfigUi += DrawConfigUI;
@@ -62,6 +67,7 @@ public sealed class Plugin : IDalamudPlugin
         _windowSystem.RemoveAllWindows();
         _mainWindow.Dispose();
         Service.CommandManager.RemoveHandler(CommandName);
+        Service.CommandManager.RemoveHandler(CommandAlias);
         _pi.UiBuilder.Draw         -= DrawUI;
         _pi.UiBuilder.OpenConfigUi -= DrawConfigUI;
         _pi.UiBuilder.OpenMainUi   -= DrawMainUI;
