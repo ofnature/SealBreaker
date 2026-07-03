@@ -14,6 +14,14 @@ Dalamud plugin (C# / .NET 10, `AllowUnsafeBlocks`, FFXIVClientStructs) that auto
   - `pluginmaster.json` (`AssemblyVersion` **and** `LastUpdate` = current Unix timestamp)
 - Bump `Configuration.Version` when changing serialized config shape; migrate legacy fields in `EnsureGcTownNav()`.
 
+### GitHub release procedure
+
+`pluginmaster.json` points at `releases/latest/download/SealBreaker.zip`, so publishing = making a new latest release:
+
+1. Build Release; zip **flat** (no folder) from `SealBreaker/bin/Release/net10.0-windows/`: `SealBreaker.dll`, `SealBreaker.json`, `icon.png`, `banner.png`, `CinzelDecorative-Bold.ttf` → `SealBreaker.zip`.
+2. Tag `v<version>` (e.g. `v1.0.0.91`) on the release commit and push the tag.
+3. Create the release named `v<version>` with the tag and upload `SealBreaker.zip` as the asset. No `gh` CLI on this machine — use the GitHub REST API with the token from `git credential fill` (works from Git Bash; PowerShell 5.1 mangles the stdin handshake).
+
 ## Project layout
 
 - `SealBreaker/Plugin.cs` — entry, `/sealbreaker` command, config load
