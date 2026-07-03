@@ -1,5 +1,6 @@
 using Dalamud.Interface.Windowing;
 using Dalamud.Interface;
+using Dalamud.Interface.Components;
 using Dalamud.Interface.ManagedFontAtlas;
 using SealBreaker.Services;
 using System;
@@ -90,6 +91,8 @@ public sealed class MainWindow : Window, IDisposable
         var ctrl = Plugin.Controller;
         cfg.ApplyAutomaticGrandCompanySettings();
 
+        using var theme = UiTheme.Begin();
+
         if (cfg.ShowWindowBanner)
             DrawPluginBanner();
 
@@ -97,10 +100,9 @@ public sealed class MainWindow : Window, IDisposable
         {
             if (ImGui.BeginTabItem("Farm"))
             {
+                ImGui.Spacing();
                 DrawStatusPanel(ctrl);
-                ImGui.Separator();
                 DrawStatsPanel(ctrl);
-                ImGui.Separator();
                 DrawControlButtons(ctrl);
                 ImGui.EndTabItem();
             }
@@ -131,13 +133,24 @@ public sealed class MainWindow : Window, IDisposable
                 ImGui.EndTabItem();
             }
 
-            foreach (var gcIdx in GcTownTopLevelTabOrder)
+            if (ImGui.BeginTabItem("GC Towns"))
             {
-                if (ImGui.BeginTabItem(GcTownTabNames[gcIdx]))
+                ImGui.Spacing();
+                if (ImGui.BeginTabBar("##gcTownTabs"))
                 {
-                    DrawGcTownTab(cfg, gcIdx);
-                    ImGui.EndTabItem();
+                    foreach (var gcIdx in GcTownTopLevelTabOrder)
+                    {
+                        if (ImGui.BeginTabItem(GcTownTabNames[gcIdx]))
+                        {
+                            DrawGcTownTab(cfg, gcIdx);
+                            ImGui.EndTabItem();
+                        }
+                    }
+
+                    ImGui.EndTabBar();
                 }
+
+                ImGui.EndTabItem();
             }
 
             if (ImGui.BeginTabItem("Setup Guide"))
@@ -230,13 +243,13 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawFarmTab(Configuration cfg)
     {
-        ImGui.TextColored(ColGray, "Farm settings");
+        UiTheme.SectionTitle("Farm settings");
 
         var runs = cfg.RunsPerCycle;
         if (ImGui.SliderInt("Runs per cycle", ref runs, 1, 50))
         { cfg.RunsPerCycle = runs; cfg.Save(); }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("How many Mistwake runs before heading to the Grand Company.");
+            ImGui.SetTooltip("How many duty runs before heading to the Grand Company.");
 
         if (ImGui.CollapsingHeader("Item filter"))
             DrawFilterPanel(cfg);
@@ -246,12 +259,12 @@ public sealed class MainWindow : Window, IDisposable
         { cfg.EchoToChat = echo; cfg.Save(); }
 
         ImGui.Spacing();
-        ImGui.TextColored(ColGray, $"GC town routes: {GcTownTabNames[cfg.GrandCompanyIndex]} tab (active GC).");
+        ImGui.TextColored(ColGray, $"GC town routes: GC Towns tab → {GcTownTabNames[cfg.GrandCompanyIndex]} (active GC).");
     }
 
     private void DrawBuyListTab(Configuration cfg)
     {
-        ImGui.TextColored(ColGray, "GC shop buy list");
+        UiTheme.SectionTitle("GC shop buy list");
         ImGui.TextWrapped("Priority order: buy each item until Keep is reached, then move to the next entry.");
         ImGui.TextDisabled("Keep 0 = spend seals on that item until reserve, then try the next entry.");
         ImGui.TextDisabled($"Seal reserve (Config tab): {cfg.SealReserve:N0} — buying stops when seals reach this amount.");
@@ -342,7 +355,7 @@ public sealed class MainWindow : Window, IDisposable
         cfg.EnsureDesynthDefaults();
         CompleteDesynthPriceFetch();
 
-        ImGui.TextColored(ColGray, "Kingcake desynthesis EV");
+        UiTheme.SectionTitle("Kingcake desynthesis EV");
         ImGui.TextDisabled("Prices: Universalis public API, Maduin. Offline/fallback values are used when live prices are missing.");
 
         ImGui.Spacing();
@@ -558,7 +571,7 @@ public sealed class MainWindow : Window, IDisposable
         var stats = DesynthTracker.Stats;
         var ev = CalculateKingcakeEv(cfg);
 
-        ImGui.TextColored(ColGray, "Kingcake desynth statistics");
+        UiTheme.SectionTitle("Kingcake desynth statistics");
         ImGui.TextDisabled("Stats are persisted to DesynthStats.json in the SealBreaker plugin config folder.");
         ImGui.Text($"Total Kingcakes desynthed: {stats.TotalKingcakesDesynthed:N0}");
         ImGui.Text($"Observed total value: {CalculateObservedDesynthValue(cfg):N0} gil");
@@ -702,7 +715,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawConfigTab(Configuration cfg)
     {
-        ImGui.TextColored(ColGray, "General configuration");
+        UiTheme.SectionTitle("General configuration");
 
         var runnerItems = new[] { "AutoDuty", "ADS (AI Duty Solver)" };
         var runner = cfg.DutyRunner;
@@ -723,6 +736,9 @@ public sealed class MainWindow : Window, IDisposable
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Disable this if the banner image or custom title font causes display/rendering issues.");
+
+        if (cfg.DutyRunner == 0 && ImGui.CollapsingHeader("AutoDuty Dungeon", ImGuiTreeNodeFlags.DefaultOpen))
+            DrawAutoDutyDutySection(cfg);
 
         if (cfg.DutyRunner == 1 && ImGui.CollapsingHeader("ADS Duty Support", ImGuiTreeNodeFlags.DefaultOpen))
             DrawAdsDutySupportSection(cfg);
@@ -874,11 +890,72 @@ public sealed class MainWindow : Window, IDisposable
         }
         else
         {
-            ImGui.TextDisabled($"Configure mender and repair route on the {GcTownTabNames[cfg.GrandCompanyIndex]} tab.");
+            ImGui.TextDisabled($"Configure mender and repair route on the GC Towns tab ({GcTownTabNames[cfg.GrandCompanyIndex]}).");
         }
 
         if (!cfg.RepairEnabled)
             ImGui.EndDisabled();
+    }
+
+    private static readonly string[] AutoDutyModeItems =
+        ["Use AutoDuty's setting", "Duty Support", "Trust", "Regular (party finder queue)", "Squadron"];
+
+    private static uint _autoDutyPathCheckTerritory;
+    private static bool _autoDutyPathCheckResult = true;
+    private static DateTime _autoDutyPathCheckAt = DateTime.MinValue;
+
+    private static void DrawAutoDutyDutySection(Configuration cfg)
+    {
+        AutoDutyCatalog.EnsureInitialized();
+        var duties = AutoDutyCatalog.Duties.ToList();
+        if (duties.Count == 0)
+        {
+            ImGui.TextColored(ColYellow, "No dungeons found in game data.");
+            return;
+        }
+
+        var selectedIndex = AutoDutyCatalog.IndexOfSelected(cfg);
+        var labels = duties.Select(AutoDutyCatalog.FormatLabel).ToArray();
+        ImGui.SetNextItemWidth(320);
+        if (ImGui.Combo("Dungeon", ref selectedIndex, labels, labels.Length))
+            AutoDutyCatalog.ApplySelection(cfg, duties[Math.Clamp(selectedIndex, 0, duties.Count - 1)]);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("AutoDuty runs this dungeon each cycle. AutoDuty must have a path for it.");
+
+        var mode = Math.Clamp(cfg.AutoDutyDutyMode, 0, AutoDutyModeItems.Length - 1);
+        ImGui.SetNextItemWidth(320);
+        if (ImGui.Combo("Duty mode", ref mode, AutoDutyModeItems, AutoDutyModeItems.Length))
+        {
+            cfg.AutoDutyDutyMode = mode;
+            cfg.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Sets AutoDuty's duty mode before each run.\n"
+                + "Duty Support / Trust run with NPCs — no other players needed, works on free trial (FTP) accounts.\n"
+                + "'Use AutoDuty's setting' leaves whatever mode is configured in AutoDuty itself.");
+
+        var selected = AutoDutyCatalog.SelectedOrDefault(cfg);
+        ImGui.TextDisabled($"Selected: {selected.Name} (territory {selected.TerritoryType})");
+
+        if (cfg.AutoDutyDutyMode is Configuration.AutoDutyModeSupport or Configuration.AutoDutyModeTrust
+            && !selected.HasDutySupport)
+        {
+            ImGui.TextColored(ColYellow, "This dungeon may not offer Duty Support/Trust — AutoDuty could fail to queue.");
+        }
+
+        if (IpcManager.AutoDutyAvailable)
+        {
+            var now = DateTime.UtcNow;
+            if (_autoDutyPathCheckTerritory != selected.TerritoryType || now - _autoDutyPathCheckAt > TimeSpan.FromSeconds(5))
+            {
+                _autoDutyPathCheckTerritory = selected.TerritoryType;
+                _autoDutyPathCheckResult = IpcManager.AutoDutyContentHasPath(selected.TerritoryType);
+                _autoDutyPathCheckAt = now;
+            }
+
+            if (!_autoDutyPathCheckResult)
+                ImGui.TextColored(ColYellow, "AutoDuty has no path for this dungeon — it cannot run it.");
+        }
     }
 
     private static void DrawAdsDutySupportSection(Configuration cfg)
@@ -908,63 +985,79 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawSetupGuide(Configuration cfg)
     {
-        ImGui.TextColored(ColGray, "Step 1 — Required Plugins");
-        DrawPluginStatus("vnavmesh", IpcManager.VnavAvailable);
-        DrawPluginStatus("Lifestream", IpcManager.LifestreamAvailable);
-        DrawPluginStatus(cfg.DutyRunner == 0 ? "AutoDuty" : "ADS", cfg.DutyRunner == 0 ? IpcManager.AutoDutyAvailable : IpcManager.AdsAvailable);
+        using (UiTheme.Card())
+        {
+            UiTheme.SectionTitle("Step 1 — Required plugins");
+            DrawPluginStatus("vnavmesh", IpcManager.VnavAvailable);
+            DrawPluginStatus("Lifestream", IpcManager.LifestreamAvailable);
+            DrawPluginStatus(cfg.DutyRunner == 0 ? "AutoDuty" : "ADS", cfg.DutyRunner == 0 ? IpcManager.AutoDutyAvailable : IpcManager.AdsAvailable);
+        }
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
+        using (UiTheme.Card())
+        {
+            UiTheme.SectionTitle("Step 2 — Game settings");
+            DrawGuideWarning("Disable auto-equip new gear: Character Config → Item Settings → Equip Retrieved Gear → OFF — gear must stay in your bags for Expert Delivery to see it");
+            DrawGuideWarning("Ensure your Grand Company rank is high enough for Expert Delivery (Second Lieutenant or above)");
+            DrawGuideWarning("Make sure your inventory has free space before starting — a full inventory will cause drops to be lost");
+        }
 
-        ImGui.TextColored(ColGray, "Step 2 — Game Settings");
-        ImGui.BulletText(string.Empty);
-        ImGui.SameLine();
-        ImGui.TextColored(ColYellow, "Disable auto-equip new gear: Character Config → Item Settings → Equip Retrieved Gear → OFF — gear must stay in your bags for Expert Delivery to see it");
-        ImGui.BulletText(string.Empty);
-        ImGui.SameLine();
-        ImGui.TextColored(ColYellow, "Ensure your Grand Company rank is high enough for Expert Delivery (Second Lieutenant or above)");
-        ImGui.BulletText(string.Empty);
-        ImGui.SameLine();
-        ImGui.TextColored(ColYellow, "Make sure your inventory has free space before starting — a full inventory will cause drops to be lost");
+        using (UiTheme.Card())
+        {
+            UiTheme.SectionTitle("Step 3 — Grand Company setup");
+            DrawGuideItem("Your Grand Company and seal cap are detected automatically (override on the Config tab)");
+            DrawGuideItem($"Current seals: {FarmController.GetCurrentSeals():N0} / {cfg.SealCap:N0}");
+            DrawGuideItem("Add the items to buy with seals on the Buy List tab — the Duck Bones preset is the default gil loop");
+        }
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
+        using (UiTheme.Card())
+        {
+            UiTheme.SectionTitle("Step 4 — First run checklist");
+            DrawGuideCheck("Set Runs Per Cycle to 1 for your first test run");
+            DrawGuideCheck("Set List Mode to Off so all gear is turned in automatically");
+            DrawGuideCheck("Click Start and watch the Farm tab log output");
+            DrawGuideCheck("Verify: zones into dungeon → completes run → teleports to GC → delivers gear → buys items → loops");
+            DrawGuideCheck("Once confirmed working, increase Runs Per Cycle and configure your item filter");
+        }
 
-        ImGui.TextColored(ColGray, "Step 3 — Grand Company Setup");
-        ImGui.BulletText("Select your Grand Company in the Configuration tab");
-        ImGui.BulletText($"Current seals: {FarmController.GetCurrentSeals():N0} / {cfg.SealCap:N0}");
-        ImGui.BulletText("Set Duckbone Shop Row by opening your GC shop, counting rows from 0, and entering that number in Configuration");
+        using (UiTheme.Card())
+        {
+            UiTheme.SectionTitle("Step 5 — Item filter setup");
+            DrawGuideItem("Run one cycle with List Mode = Off");
+            DrawGuideItem("Check plugin log for 'DROP: ItemID XXXXX' lines to find IDs of dropped gear");
+            DrawGuideItem("Add any item IDs you want to KEEP to the Protected Item IDs list in Configuration");
+            DrawGuideItem("Switch List Mode to Blacklist — everything except your protected IDs will be turned in");
+            DrawGuideItem("Use Whitelist mode instead if you only want to deliver specific items and keep everything else");
+        }
+    }
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
+    private static void DrawGuideWarning(string text)
+    {
+        UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Yellow);
+        ImGui.SameLine(0, 6);
+        ImGui.TextWrapped(text);
+    }
 
-        ImGui.TextColored(ColGray, "Step 4 — First Run Checklist");
-        ImGui.TextColored(ColGray, "✓ Set Runs Per Cycle to 1 for your first test run");
-        ImGui.TextColored(ColGray, "✓ Set List Mode to Off so all gear is turned in automatically");
-        ImGui.TextColored(ColGray, "✓ Click Start and watch the Farm tab log output");
-        ImGui.TextColored(ColGray, "✓ Verify: zones into dungeon → completes run → teleports to GC → delivers gear → buys items → loops");
-        ImGui.TextColored(ColGray, "✓ Once confirmed working, increase Runs Per Cycle and configure your item filter");
+    private static void DrawGuideItem(string text)
+    {
+        UiTheme.Icon(FontAwesomeIcon.AngleRight, UiTheme.Gray);
+        ImGui.SameLine(0, 6);
+        ImGui.TextWrapped(text);
+    }
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
-
-        ImGui.TextColored(ColGray, "Step 5 — Item Filter Setup");
-        ImGui.BulletText("Run one cycle with List Mode = Off");
-        ImGui.BulletText("Check plugin log for 'DROP: ItemID XXXXX' lines to find IDs of dropped gear");
-        ImGui.BulletText("Add any item IDs you want to KEEP to the Protected Item IDs list in Configuration");
-        ImGui.BulletText("Switch List Mode to Blacklist — everything except your protected IDs will be turned in");
-        ImGui.BulletText("Use Whitelist mode instead if you only want to deliver specific items and keep everything else");
+    private static void DrawGuideCheck(string text)
+    {
+        UiTheme.Icon(FontAwesomeIcon.Check, UiTheme.Green);
+        ImGui.SameLine(0, 6);
+        ImGui.TextWrapped(text);
     }
 
     private static void DrawPluginStatus(string pluginName, bool available)
     {
-        var marker = available ? "✓" : "✗";
-        var status = available ? "Installed" : "NOT DETECTED — install from your plugin list";
-        ImGui.TextColored(available ? ColGreen : ColRed, $"{marker} {pluginName}: {status}");
+        UiTheme.Icon(available ? FontAwesomeIcon.CheckCircle : FontAwesomeIcon.TimesCircle, available ? UiTheme.Green : UiTheme.Red);
+        ImGui.SameLine(0, 6);
+        ImGui.TextColored(
+            available ? UiTheme.Green : UiTheme.Red,
+            $"{pluginName}: {(available ? "Installed" : "NOT DETECTED — install from your plugin list")}");
     }
 
     private static void DrawMateriaExtractionSection(Configuration cfg)
@@ -1297,54 +1390,104 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawStatusPanel(FarmController ctrl)
     {
-        ImGui.TextColored(ColGray, "Status  ");
-        ImGui.SameLine();
+        var cfg = Plugin.Config;
 
-        var (label, col) = ctrl.State switch
+        using (UiTheme.Card())
         {
-            FarmController.FarmState.Idle  => ("Idle",    ColGray),
-            FarmController.FarmState.Error => ("Error",   ColRed),
-            _                              => ("Running", ColGreen),
-        };
-        ImGui.TextColored(col, label);
-        ImGui.TextWrapped(ctrl.StatusMessage);
+            var (label, col) = ctrl.State switch
+            {
+                FarmController.FarmState.Idle  => ("Idle",    UiTheme.Gray),
+                FarmController.FarmState.Error => ("Error",   UiTheme.Red),
+                _                              => ("Running", UiTheme.Green),
+            };
+
+            UiTheme.StatusDot(col);
+            ImGui.SameLine(0, 5);
+            ImGui.TextColored(col, label);
+
+            ImGui.SameLine(0, 8);
+            var dutyName = cfg.DutyRunner == 0
+                ? AutoDutyCatalog.SelectedOrDefault(cfg).Name
+                : DutySupportCatalog.SelectedOrDefault(cfg).Name;
+            var runnerLabel = cfg.DutyRunner == 0
+                ? cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty"
+                : "ADS · Duty Support";
+            ImGui.TextColored(UiTheme.TextBright, dutyName);
+            ImGui.SameLine(0, 8);
+            ImGui.TextColored(UiTheme.Gray, runnerLabel);
+
+            if (ctrl.IsRunning)
+            {
+                var elapsed = DateTime.Now - ctrl.StartTime;
+                ImGui.SameLine();
+                UiTheme.RightAlignedText($"{elapsed:hh\\:mm\\:ss}", UiTheme.Gray);
+            }
+
+            if (ctrl.IsRunning && !ctrl.IsAnyTestMode && cfg.RunsPerCycle > 0)
+            {
+                var done = Math.Clamp(ctrl.RunsThisCycle, 0, cfg.RunsPerCycle);
+                var current = Math.Min(done + 1, cfg.RunsPerCycle);
+                ImGui.PushStyleColor(ImGuiCol.PlotHistogram, UiTheme.GreenDark);
+                ImGui.ProgressBar(done / (float)cfg.RunsPerCycle, new Vector2(-1, 16), $"Run {current} / {cfg.RunsPerCycle}");
+                ImGui.PopStyleColor();
+            }
+
+            ImGui.TextColored(UiTheme.Gray, ctrl.StatusMessage);
+        }
 
         if (ctrl.LastError != null)
-            ImGui.TextColored(ColRed, $"Last error: {ctrl.LastError}");
+        {
+            using (UiTheme.Card())
+            {
+                UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Red);
+                ImGui.SameLine(0, 6);
+                ImGui.TextColored(UiTheme.Red, "Last error");
+                ImGui.TextWrapped(ctrl.LastError);
+            }
+        }
     }
 
     private static void DrawStatsPanel(FarmController ctrl)
     {
-        ImGui.TextColored(ColGray, "Statistics");
-
         var elapsed = ctrl.IsRunning
             ? DateTime.Now - ctrl.StartTime
             : TimeSpan.Zero;
         var duckBonesTotal = FarmController.GetDuckBoneInventoryCount();
         var duckBonesValue = duckBonesTotal * 360;
 
-        ImGui.Columns(2, "stats", false);
-        ImGui.Text("Cycles:");       ImGui.NextColumn(); ImGui.Text($"{ctrl.TotalCycles}");      ImGui.NextColumn();
-        ImGui.Text("Runs:");         ImGui.NextColumn(); ImGui.Text($"{ctrl.TotalRuns}");        ImGui.NextColumn();
-        ImGui.Text("Seals earned:");      ImGui.NextColumn(); ImGui.Text($"{ctrl.TotalSeals:N0}");              ImGui.NextColumn();
-        ImGui.Text("Duck Bones Bought:"); ImGui.NextColumn(); ImGui.Text($"{ctrl.TotalDuckbones:N0}");          ImGui.NextColumn();
-        ImGui.Text("Duck Bones Total:");  ImGui.NextColumn(); ImGui.Text($"{duckBonesTotal:N0}"); ImGui.NextColumn();
-        ImGui.Text("Estimated Duck Bone Value:"); ImGui.NextColumn(); ImGui.Text($"{duckBonesValue:N0}"); ImGui.NextColumn();
-        ImGui.Text("Runtime:");           ImGui.NextColumn(); ImGui.Text($"{elapsed:hh\\:mm\\:ss}");             ImGui.NextColumn();
-
-        if (ctrl.TotalRunsTracked > 0)
+        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(9, 6));
+        if (ImGui.BeginTable("##farmMetrics", 3, ImGuiTableFlags.SizingStretchSame))
         {
-            ImGui.Text("Avg clear time:"); ImGui.NextColumn();
-            ImGui.Text($"{ctrl.AverageClearTime:mm\\:ss}"); ImGui.NextColumn();
+            var cellBg = ImGui.ColorConvertFloat4ToU32(UiTheme.CardBg);
+            void Cell(string label, string value, Vector4? color = null)
+            {
+                ImGui.TableNextColumn();
+                ImGui.TableSetBgColor(ImGuiTableBgTarget.CellBg, cellBg);
+                UiTheme.MetricCell(label, value, color);
+            }
 
-            ImGui.Text("Fastest run:"); ImGui.NextColumn();
-            ImGui.Text($"{ctrl.FastestClearTime:mm\\:ss}"); ImGui.NextColumn();
+            Cell("Seals earned", $"{ctrl.TotalSeals:N0}", UiTheme.Accent);
+            Cell("Runs", $"{ctrl.TotalRuns}");
+            Cell("Cycles", $"{ctrl.TotalCycles}");
+            Cell("Duck bones", $"{duckBonesTotal:N0}");
+            Cell("Bought", $"{ctrl.TotalDuckbones:N0}");
+            Cell("Est. value", $"{duckBonesValue:N0}g", UiTheme.Green);
+            Cell("Runtime", $"{elapsed:hh\\:mm\\:ss}");
+            if (ctrl.TotalRunsTracked > 0)
+            {
+                Cell("Avg clear", $"{ctrl.AverageClearTime:mm\\:ss}");
+                Cell("Best / worst", $"{ctrl.FastestClearTime:mm\\:ss} / {ctrl.SlowestClearTime:mm\\:ss}");
+            }
+            else
+            {
+                Cell("Avg clear", "—");
+                Cell("Best / worst", "—");
+            }
 
-            ImGui.Text("Slowest run:"); ImGui.NextColumn();
-            ImGui.Text($"{ctrl.SlowestClearTime:mm\\:ss}"); ImGui.NextColumn();
+            ImGui.EndTable();
         }
-
-        ImGui.Columns(1);
+        ImGui.PopStyleVar();
+        ImGui.Spacing();
     }
 
     private static void DrawGcShopBuyList(Configuration cfg, int gcIdx, List<GcShopBuyEntry> buyList)
@@ -1375,41 +1518,129 @@ public sealed class MainWindow : Window, IDisposable
         {
             ImGui.Spacing();
             ImGui.TextColored(ColYellow, "No buy entries yet — add Duck Bones or a blank entry to get started.");
+            return;
         }
 
-        for (var i = 0; i < buyList.Count; i++)
+        var removeIdx = -1;
+        var moveFrom = -1;
+        var moveTo = -1;
+
+        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(6, 4));
+        if (ImGui.BeginTable("##buyListTable", 6,
+                ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.PadOuterX))
         {
-            var entry = buyList[i];
-            ImGui.PushID(i);
-            ImGui.Separator();
-            ImGui.Text($"#{i + 1}");
+            ImGui.TableSetupColumn("##on", ImGuiTableColumnFlags.WidthFixed, 24);
+            ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 48);
+            ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 44);
+            ImGui.TableSetupColumn("Have", ImGuiTableColumnFlags.WidthFixed, 48);
+            ImGui.TableSetupColumn("##actions", ImGuiTableColumnFlags.WidthFixed, 108);
+            ImGui.TableHeadersRow();
 
-            var enabled = entry.Enabled;
-            if (ImGui.Checkbox("Enabled", ref enabled))
-            { entry.Enabled = enabled; cfg.Save(); }
-
-            ImGui.SameLine();
-            if (i > 0 && ImGui.SmallButton("Up"))
+            for (var i = 0; i < buyList.Count; i++)
             {
-                (buyList[i - 1], buyList[i]) = (buyList[i], buyList[i - 1]);
-                cfg.Save();
-            }
+                var entry = buyList[i];
+                ImGui.PushID(i);
+                ImGui.TableNextRow();
 
-            ImGui.SameLine();
-            if (i < buyList.Count - 1 && ImGui.SmallButton("Down"))
-            {
-                (buyList[i + 1], buyList[i]) = (buyList[i], buyList[i + 1]);
-                cfg.Save();
-            }
+                ImGui.TableNextColumn();
+                var enabled = entry.Enabled;
+                if (ImGui.Checkbox("##enabled", ref enabled))
+                { entry.Enabled = enabled; cfg.Save(); }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Enable/disable this entry.");
 
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Remove"))
-            {
-                buyList.RemoveAt(i);
-                cfg.Save();
+                ImGui.TableNextColumn();
+                var label = string.IsNullOrWhiteSpace(entry.ItemName) ? "(unnamed)" : entry.ItemName;
+                ImGui.TextColored(entry.Enabled ? UiTheme.Accent : UiTheme.Gray, label);
+                ImGui.SameLine(0, 6);
+                ImGui.TextColored(UiTheme.Gray, $"{entry.SealCost:N0}s");
+
+                ImGui.TableNextColumn();
+                ImGui.SetNextItemWidth(-1);
+                var keep = entry.KeepAmount;
+                if (ImGui.InputInt("##keep", ref keep, 0, 0))
+                { entry.KeepAmount = Math.Max(0, keep); cfg.Save(); }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Keep amount — stop buying at this inventory count. 0 = buy until seal reserve.");
+
+                ImGui.TableNextColumn();
+                ImGui.SetNextItemWidth(-1);
+                var qty = entry.BuyQtyPerPurchase;
+                if (ImGui.InputInt("##qty", ref qty, 0, 0))
+                { entry.BuyQtyPerPurchase = Math.Clamp(qty, 0, 99); cfg.Save(); }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Buy quantity per purchase. 0 = max affordable (up to 99).");
+
+                ImGui.TableNextColumn();
+                ImGui.Text($"{FarmController.GetInventoryItemCountPublic(entry):N0}");
+
+                ImGui.TableNextColumn();
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowUp) && i > 0)
+                { moveFrom = i; moveTo = i - 1; }
+                ImGui.SameLine(0, 2);
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.ArrowDown) && i < buyList.Count - 1)
+                { moveFrom = i; moveTo = i + 1; }
+                ImGui.SameLine(0, 2);
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.Edit))
+                {
+                    var wasEditing = _buyEditGc == gcIdx && _buyEditIdx == i;
+                    _buyEditGc = wasEditing ? -1 : gcIdx;
+                    _buyEditIdx = wasEditing ? -1 : i;
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Edit name, item ID, and shop tuning.");
+                ImGui.SameLine(0, 2);
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.Trash))
+                    removeIdx = i;
+
                 ImGui.PopID();
-                break;
             }
+
+            ImGui.EndTable();
+        }
+        ImGui.PopStyleVar();
+
+        if (moveFrom >= 0 && moveTo >= 0)
+        {
+            (buyList[moveFrom], buyList[moveTo]) = (buyList[moveTo], buyList[moveFrom]);
+            if (_buyEditGc == gcIdx && _buyEditIdx == moveFrom)
+                _buyEditIdx = moveTo;
+            else if (_buyEditGc == gcIdx && _buyEditIdx == moveTo)
+                _buyEditIdx = moveFrom;
+            cfg.Save();
+        }
+
+        if (removeIdx >= 0)
+        {
+            buyList.RemoveAt(removeIdx);
+            if (_buyEditGc == gcIdx && _buyEditIdx == removeIdx)
+            { _buyEditGc = -1; _buyEditIdx = -1; }
+            else if (_buyEditGc == gcIdx && _buyEditIdx > removeIdx)
+                _buyEditIdx--;
+            cfg.Save();
+        }
+
+        if (_buyEditGc == gcIdx && _buyEditIdx >= 0 && _buyEditIdx < buyList.Count)
+            DrawBuyEntryEditor(cfg, gcIdx, buyList[_buyEditIdx]);
+    }
+
+    private static int _buyEditGc = -1;
+    private static int _buyEditIdx = -1;
+
+    private static void DrawBuyEntryEditor(Configuration cfg, int gcIdx, GcShopBuyEntry entry)
+    {
+        ImGui.Spacing();
+        using (UiTheme.Card())
+        {
+            ImGui.TextColored(UiTheme.Accent, $"Edit entry #{_buyEditIdx + 1}");
+            ImGui.SameLine();
+            var closeWidth = ImGui.CalcTextSize("Close").X + 14;
+            var avail = ImGui.GetContentRegionAvail().X;
+            if (avail > closeWidth)
+                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + avail - closeWidth);
+            if (ImGui.SmallButton("Close"))
+            { _buyEditGc = -1; _buyEditIdx = -1; return; }
 
             DrawEntryCatalogPicker(cfg, entry, gcIdx);
 
@@ -1421,48 +1652,31 @@ public sealed class MainWindow : Window, IDisposable
             if (ImGui.InputInt("Item ID (0=lookup)", ref itemId))
             { entry.ItemId = (uint)Math.Max(0, itemId); cfg.Save(); }
 
-            if (ImGui.CollapsingHeader("Shop tuning (manual override)"))
-            {
-                ImGui.TextDisabled("Seal cost, tabs, and list row are auto-resolved from game data when possible.");
-                ImGui.Indent();
+            ImGui.Spacing();
+            ImGui.TextColored(UiTheme.Gray, "Shop tuning (manual override)");
+            ImGui.TextDisabled("Seal cost, tabs, and list row are auto-resolved from game data when possible.");
 
-                var sealCost = entry.SealCost;
-                if (ImGui.InputInt("Seal cost", ref sealCost))
-                { entry.SealCost = Math.Max(1, sealCost); cfg.Save(); }
+            var sealCost = entry.SealCost;
+            if (ImGui.InputInt("Seal cost", ref sealCost))
+            { entry.SealCost = Math.Max(1, sealCost); cfg.Save(); }
 
-                var cat = entry.CategoryTab;
-                if (ImGui.InputInt("Category tab", ref cat))
-                { entry.CategoryTab = Math.Clamp(cat, 0, 3); cfg.Save(); }
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Weapons=0, Armor=1, Materiel=2, Materials=3.");
+            var cat = entry.CategoryTab;
+            if (ImGui.InputInt("Category tab", ref cat))
+            { entry.CategoryTab = Math.Clamp(cat, 0, 3); cfg.Save(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Weapons=0, Armor=1, Materiel=2, Materials=3.");
 
-                var rank = entry.RankTab;
-                if (ImGui.InputInt("Rank tab", ref rank))
-                { entry.RankTab = Math.Clamp(rank, 0, 2); cfg.Save(); }
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Left rank icons: top=0, middle=1, bottom=2.");
+            var rank = entry.RankTab;
+            if (ImGui.InputInt("Rank tab", ref rank))
+            { entry.RankTab = Math.Clamp(rank, 0, 2); cfg.Save(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Left rank icons: top=0, middle=1, bottom=2.");
 
-                var row = entry.ListRow;
-                if (ImGui.InputInt("List row", ref row))
-                { entry.ListRow = Math.Max(0, row); cfg.Save(); }
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("0-based fallback row if name search fails.");
-
-                ImGui.Unindent();
-            }
-
-            var keep = entry.KeepAmount;
-            if (ImGui.InputInt("Keep amount", ref keep))
-            { entry.KeepAmount = Math.Max(0, keep); cfg.Save(); }
-
-            var qty = entry.BuyQtyPerPurchase;
-            if (ImGui.InputInt("Buy qty (0=max)", ref qty))
-            { entry.BuyQtyPerPurchase = Math.Clamp(qty, 0, 99); cfg.Save(); }
-
-            var have = FarmController.GetInventoryItemCountPublic(entry);
-            ImGui.TextDisabled($"In inventory: {have:N0}");
-
-            ImGui.PopID();
+            var row = entry.ListRow;
+            if (ImGui.InputInt("List row", ref row))
+            { entry.ListRow = Math.Max(0, row); cfg.Save(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("0-based fallback row if name search fails.");
         }
     }
 
@@ -1497,7 +1711,7 @@ public sealed class MainWindow : Window, IDisposable
         if (!canRun)
             ImGui.BeginDisabled();
 
-        if (ImGui.Button("Delivery", new Vector2(100, 30)))
+        if (ImGui.Button("Delivery"))
             ctrl.StartExpertDeliveryTest();
 
         if (!canRun)
@@ -1524,7 +1738,7 @@ public sealed class MainWindow : Window, IDisposable
         if (!canRun)
             ImGui.BeginDisabled();
 
-        if (ImGui.Button("Shop", new Vector2(100, 30)))
+        if (ImGui.Button("Shop"))
             ctrl.StartShopTest();
 
         if (!canRun)
@@ -1552,7 +1766,7 @@ public sealed class MainWindow : Window, IDisposable
         if (!canRun)
             ImGui.BeginDisabled();
 
-        if (ImGui.Button("Kingcake", new Vector2(100, 30)))
+        if (ImGui.Button("Kingcake"))
             ctrl.StartKingcakeBuyTest();
 
         if (!canRun)
@@ -1581,7 +1795,7 @@ public sealed class MainWindow : Window, IDisposable
         if (!canRun)
             ImGui.BeginDisabled();
 
-        if (ImGui.Button("Repair", new Vector2(100, 30)))
+        if (ImGui.Button("Repair"))
             ctrl.StartRepair();
 
         if (!canRun)
@@ -1612,7 +1826,7 @@ public sealed class MainWindow : Window, IDisposable
         if (!canRun)
             ImGui.BeginDisabled();
 
-        if (ImGui.Button("Extract", new Vector2(100, 30)))
+        if (ImGui.Button("Extract"))
             ctrl.StartExtractTest();
 
         if (!canRun)
@@ -1631,28 +1845,7 @@ public sealed class MainWindow : Window, IDisposable
     {
         var cfg = Plugin.Config;
 
-        if (cfg.DutyRunner == 0)
-        {
-            if (!IpcManager.AutoDutyPluginLoaded)
-                ImGui.TextColored(ColRed, "! AutoDuty plugin not loaded");
-            else if (!IpcManager.AutoDutyAvailable)
-                ImGui.TextColored(ColYellow, "! AutoDuty loaded — waiting for Run IPC (restart AutoDuty if this persists)");
-        }
-
-        if (cfg.DutyRunner == 1)
-        {
-            if (!IpcManager.AdsPluginLoaded)
-                ImGui.TextColored(ColRed, "! ADS plugin not loaded");
-            else if (!IpcManager.AdsAvailable)
-                ImGui.TextColored(ColYellow, "! ADS loaded — waiting for IPC");
-        }
-        if (!IpcManager.VnavAvailable)
-            ImGui.TextColored(ColRed, "! vnavmesh not detected");
-        if (!IpcManager.LifestreamAvailable)
-            ImGui.TextColored(ColRed, "! Lifestream not detected");
-        else if (!IpcManager.LifestreamMoveAvailable)
-            ImGui.TextColored(ColYellow, "! Lifestream.Move unavailable — using vnav fallback");
-
+        DrawPrereqChips(cfg);
         ImGui.Spacing();
 
         var dutyReady = cfg.DutyRunner == 0
@@ -1663,38 +1856,81 @@ public sealed class MainWindow : Window, IDisposable
                     && IpcManager.VnavAvailable
                     && IpcManager.LifestreamAvailable;
 
+        var buttonSize = new Vector2(ImGui.GetContentRegionAvail().X, 34);
         if (ctrl.IsRunning)
         {
-            ImGui.PushStyleColor(ImGuiCol.Button, ColRed);
-            if (ImGui.Button("Stop##farm", new Vector2(120, 30))) ctrl.Stop();
-            ImGui.PopStyleColor();
+            if (UiTheme.StopButton("Stop farm##farm", buttonSize)) ctrl.Stop();
         }
         else
         {
             if (!allReady) ImGui.BeginDisabled();
-            ImGui.PushStyleColor(ImGuiCol.Button, ColGreen);
-            if (ImGui.Button("Start##farm", new Vector2(120, 30))) ctrl.Start();
-            ImGui.PopStyleColor();
+            if (UiTheme.StartButton("Start farm##farm", buttonSize)) ctrl.Start();
             if (!allReady) ImGui.EndDisabled();
+            if (!allReady && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip("Install/enable the plugins marked red above.");
         }
 
+        ImGui.Spacing();
+        ImGui.TextColored(UiTheme.Gray, "Tests");
         ImGui.SameLine();
         DrawExpertDeliveryTestButton(ctrl);
         ImGui.SameLine();
         DrawShopTestButton(ctrl);
-
-        ImGui.Spacing();
-
-        DrawKingcakeTestButton(ctrl);
         ImGui.SameLine();
         DrawRepairTestButton(ctrl);
         ImGui.SameLine();
         DrawExtractTestButton(ctrl);
+        ImGui.SameLine();
+        DrawKingcakeTestButton(ctrl);
 
         if (ctrl.State == FarmController.FarmState.Error)
         {
-            ImGui.SameLine();
-            if (ImGui.Button("Clear Error", new Vector2(120, 30))) ctrl.Stop();
+            ImGui.Spacing();
+            if (UiTheme.SolidButton("Clear error", UiTheme.RedDark, new Vector2(120, 26))) ctrl.Stop();
         }
+    }
+
+    private static void DrawPrereqChips(Configuration cfg)
+    {
+        if (cfg.DutyRunner == 0)
+        {
+            if (IpcManager.AutoDutyAvailable)
+                UiTheme.Chip(FontAwesomeIcon.Check, "AutoDuty", UiTheme.Green);
+            else if (IpcManager.AutoDutyPluginLoaded)
+                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "AutoDuty IPC not ready", UiTheme.Yellow);
+            else
+                UiTheme.Chip(FontAwesomeIcon.Times, "AutoDuty", UiTheme.Red);
+
+            if (IpcManager.AutoDutyPluginLoaded && !IpcManager.AutoDutyAvailable
+                && ImGui.IsItemHovered())
+                ImGui.SetTooltip("AutoDuty is loaded but the Run IPC is not ready — restart AutoDuty if this persists.");
+        }
+        else
+        {
+            if (IpcManager.AdsAvailable)
+                UiTheme.Chip(FontAwesomeIcon.Check, "ADS", UiTheme.Green);
+            else if (IpcManager.AdsPluginLoaded)
+                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "ADS IPC not ready", UiTheme.Yellow);
+            else
+                UiTheme.Chip(FontAwesomeIcon.Times, "ADS", UiTheme.Red);
+        }
+
+        ImGui.SameLine(0, 14);
+        UiTheme.Chip(
+            IpcManager.VnavAvailable ? FontAwesomeIcon.Check : FontAwesomeIcon.Times,
+            "vnavmesh",
+            IpcManager.VnavAvailable ? UiTheme.Green : UiTheme.Red);
+
+        ImGui.SameLine(0, 14);
+        if (!IpcManager.LifestreamAvailable)
+            UiTheme.Chip(FontAwesomeIcon.Times, "Lifestream", UiTheme.Red);
+        else if (!IpcManager.LifestreamMoveAvailable)
+        {
+            UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Lifestream (vnav fallback)", UiTheme.Yellow);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Lifestream.Move IPC unavailable — walking routes fall back to vnavmesh.");
+        }
+        else
+            UiTheme.Chip(FontAwesomeIcon.Check, "Lifestream", UiTheme.Green);
     }
 }

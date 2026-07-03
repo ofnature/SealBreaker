@@ -103,6 +103,21 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>0 = AutoDuty, 1 = ADS (AI Duty Solver)</summary>
     public int DutyRunner { get; set; } = 0;
+
+    public const int AutoDutyModeKeep = 0;
+    public const int AutoDutyModeSupport = 1;
+    public const int AutoDutyModeTrust = 2;
+    public const int AutoDutyModeRegular = 3;
+    public const int AutoDutyModeSquadron = 4;
+
+    /// <summary>Dungeon the AutoDuty runner farms.</summary>
+    public uint AutoDutyTerritoryType { get; set; } = DutySupportCatalog.MistwakeTerritoryType;
+    public uint AutoDutyContentFinderConditionId { get; set; }
+    public string AutoDutyDutyName { get; set; } = DutySupportCatalog.MistwakeName;
+
+    /// <summary>0 = keep AutoDuty's own setting, 1 = Support, 2 = Trust, 3 = Regular, 4 = Squadron.</summary>
+    public int AutoDutyDutyMode { get; set; } = AutoDutyModeKeep;
+
     public uint AdsDutySupportContentFinderConditionId { get; set; }
     public uint AdsDutySupportTerritoryType { get; set; } = DutySupportCatalog.MistwakeTerritoryType;
     public string AdsDutySupportName { get; set; } = DutySupportCatalog.MistwakeName;
@@ -452,6 +467,16 @@ public class Configuration : IPluginConfiguration
         RepairProvider = Math.Clamp(RepairProvider, RepairProviderSealBreaker, RepairProviderAds);
         AdsRepairMode = Math.Clamp(AdsRepairMode, AdsRepairModeSelf, AdsRepairModeNpcNoTeleportNoInn);
     }
+
+    /// <summary>AutoDuty DutyModeEnum config value, or null to keep AutoDuty's own setting.</summary>
+    public string? AutoDutyModeConfigValue() => AutoDutyDutyMode switch
+    {
+        AutoDutyModeSupport => "Support",
+        AutoDutyModeTrust => "Trust",
+        AutoDutyModeRegular => "Regular",
+        AutoDutyModeSquadron => "Squadron",
+        _ => null,
+    };
 
     public string AdsRepairModeCommand() => AdsRepairMode switch
     {

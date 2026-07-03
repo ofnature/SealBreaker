@@ -26,6 +26,8 @@ internal static class IpcManager
     private static ICallGateSubscriber<uint, int, object>?         _autoDutyRunTwoArg;
     private static ICallGateSubscriber<object>?                  _autoDutyStop;
     private static ICallGateSubscriber<bool>?                     _autoDutyIsStopped;
+    private static ICallGateSubscriber<string, object, object>?  _autoDutySetConfig;
+    private static ICallGateSubscriber<uint, bool>?               _autoDutyContentHasPath;
 
     public static bool AutoDutyPluginLoaded => IsPluginLoaded(AutoDutyPluginInternalName);
 
@@ -54,6 +56,10 @@ internal static class IpcManager
             _autoDutyStop = null;
         if (_autoDutyIsStopped is { HasFunction: false })
             _autoDutyIsStopped = null;
+        if (_autoDutySetConfig is { HasAction: false, HasFunction: false })
+            _autoDutySetConfig = null;
+        if (_autoDutyContentHasPath is { HasFunction: false })
+            _autoDutyContentHasPath = null;
 
         EnsureAutoDutySubscribers();
     }
@@ -66,6 +72,8 @@ internal static class IpcManager
             _autoDutyRunTwoArg ??= Service.PluginInterface.GetIpcSubscriber<uint, int, object>("AutoDuty.Run");
             _autoDutyStop      ??= Service.PluginInterface.GetIpcSubscriber<object>("AutoDuty.Stop");
             _autoDutyIsStopped ??= Service.PluginInterface.GetIpcSubscriber<bool>("AutoDuty.IsStopped");
+            _autoDutySetConfig ??= Service.PluginInterface.GetIpcSubscriber<string, object, object>("AutoDuty.SetConfig");
+            _autoDutyContentHasPath ??= Service.PluginInterface.GetIpcSubscriber<uint, bool>("AutoDuty.ContentHasPath");
         }
         catch
         {
@@ -125,6 +133,42 @@ internal static class IpcManager
         }
         catch (IpcNotReadyError) { _autoDutyStop = null; }
         catch (Exception ex) { Service.PluginLog.Error(ex, "AutoDuty.Stop IPC failed"); }
+    }
+
+    /// <summary>Set an AutoDuty config value by name (case-insensitive), e.g. dutyModeEnum = Support.</summary>
+    public static bool AutoDutySetConfig(string config, string value)
+    {
+        RefreshAutoDutySubscribers();
+        if (_autoDutySetConfig is not { HasAction: true })
+            return false;
+
+        try
+        {
+            _autoDutySetConfig.InvokeAction(config, value);
+            return true;
+        }
+        catch (IpcNotReadyError)
+        {
+            _autoDutySetConfig = null;
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Error(ex, "AutoDuty.SetConfig IPC failed");
+            return false;
+        }
+    }
+
+    /// <summary>True when AutoDuty has a path file for the territory. Defaults to true when the IPC is unavailable.</summary>
+    public static bool AutoDutyContentHasPath(uint territoryType)
+    {
+        RefreshAutoDutySubscribers();
+        if (_autoDutyContentHasPath is not { HasFunction: true })
+            return true;
+
+        try { return _autoDutyContentHasPath.InvokeFunc(territoryType); }
+        catch (IpcNotReadyError) { _autoDutyContentHasPath = null; return true; }
+        catch { return true; }
     }
 
     public static bool AutoDutyIsStopped()
@@ -932,6 +976,8 @@ internal static class IpcManager
         _autoDutyRunTwoArg = null;
         _autoDutyStop      = null;
         _autoDutyIsStopped = null;
+        _autoDutySetConfig = null;
+        _autoDutyContentHasPath = null;
         _adsStartDutyFromOutside = null;
         _adsStartDutyFromInside  = null;
         _adsResumeDutyFromInside = null;

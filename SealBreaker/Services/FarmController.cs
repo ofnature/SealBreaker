@@ -33,7 +33,6 @@ internal unsafe struct GCExpertEntry
 
 public sealed class FarmController : IDisposable
 {
-    private const uint MistwakeContentId = 1314;
     private const int GcSupplyMenuOption = 0;      // "Undertake supply and provisioning missions."
     private const int GcOfficerDismissOption = 3;  // "Nothing." — closes the personnel officer menu
     private const int GcExpertDeliveryTab = 2;     // 3rd horizontal tab: Supply / Provisioning / Expert Delivery
@@ -208,6 +207,7 @@ public sealed class FarmController : IDisposable
         ? TimeSpan.Zero
         : _runClearTimes.Max();
     public int TotalRunsTracked => _runClearTimes.Count;
+    public int RunsThisCycle => _runsThisCycle;
 
     private int   _runsThisCycle;
     private int   _pendingHandinRow = -1;
@@ -285,6 +285,7 @@ public sealed class FarmController : IDisposable
     private DateTime? _kingcakeDesynthConsumedUtc;
     private int _kingcakeDesynthStartCount;
     private Dictionary<uint, int> _kingcakeDesynthStartDropCounts = new();
+    private List<uint> _kingcakeDesynthObservedResultDrops = [];
     private const int DutyExitTimeoutMs = 90_000;
     private string?   _lastStatusLogMessage;
     private DateTime  _lastStatusLogAt;
@@ -3098,12 +3099,24 @@ public sealed class FarmController : IDisposable
             if (!TryPrepareAutoDutyRun())
                 return false;
 
-            if (!IpcManager.AutoDutyRun(MistwakeContentId, 1))
+            var autoDutyDuty = AutoDutyCatalog.SelectedOrDefault(Plugin.Config);
+            if (!IpcManager.AutoDutyContentHasPath(autoDutyDuty.TerritoryType))
+            {
+                await SetErrorAsync($"AutoDuty has no path for {autoDutyDuty.Name} (territory {autoDutyDuty.TerritoryType}) — pick another duty or update AutoDuty");
+                return false;
+            }
+
+            var modeValue = Plugin.Config.AutoDutyModeConfigValue();
+            if (modeValue != null && !IpcManager.AutoDutySetConfig("dutyModeEnum", modeValue))
+                await LogAsync($"WARN: Could not set AutoDuty duty mode to {modeValue} — using AutoDuty's current setting");
+
+            if (!IpcManager.AutoDutyRun(autoDutyDuty.TerritoryType, 1))
             {
                 await SetErrorAsync("AutoDuty.Run IPC failed");
                 return false;
             }
 
+            await LogAsync($"AutoDuty run started: {autoDutyDuty.Name}{(modeValue != null ? $" ({modeValue})" : string.Empty)}");
             _autoDutyStoppedAt = DateTime.MinValue;
             return true;
         }
@@ -4399,6 +4412,7 @@ public sealed class FarmController : IDisposable
             return false;
         }
 
+        var startDropCounts = SnapshotKingcakeDropCounts();
         if (!TryDesynthFirstKingcake())
         {
             message = "Could not start Kingcake desynth safely. Open your inventory and make sure a Kingcake is in a normal inventory slot.";
@@ -4409,7 +4423,8 @@ public sealed class FarmController : IDisposable
         _kingcakeDesynthStartedUtc = DateTime.UtcNow;
         _kingcakeDesynthConsumedUtc = null;
         _kingcakeDesynthStartCount = count;
-        _kingcakeDesynthStartDropCounts = SnapshotKingcakeDropCounts();
+        _kingcakeDesynthStartDropCounts = startDropCounts;
+        _kingcakeDesynthObservedResultDrops.Clear();
         message = $"Started Kingcake desynth for item {KingcakeDesynth.KingcakeItemId}. Confirm the in-game prompt if one appears.";
         return true;
     }
@@ -4490,10 +4505,7 @@ public sealed class FarmController : IDisposable
             : [];
 
         if (drops.Count > 0)
-        {
-            RecordPendingKingcakeDesynth(drops);
-            return;
-        }
+            _kingcakeDesynthObservedResultDrops = drops;
 
         var currentCount = GetKingcakeInventoryCount();
         if (currentCount >= _kingcakeDesynthStartCount)
@@ -4504,9 +4516,10 @@ public sealed class FarmController : IDisposable
             return;
 
         var inventoryDrops = GetKingcakeDropInventoryDeltas();
-        RecordPendingKingcakeDesynth(inventoryDrops);
-        Log(inventoryDrops.Count > 0
-            ? $"Recorded Kingcake desynth stats from inventory deltas ({inventoryDrops.Count} drop item(s))."
+        var mergedDrops = MergeDropObservations(_kingcakeDesynthObservedResultDrops, inventoryDrops);
+        RecordPendingKingcakeDesynth(mergedDrops);
+        Log(mergedDrops.Count > 0
+            ? $"Recorded Kingcake desynth stats from merged results ({mergedDrops.Count} drop item(s))."
             : "Recorded Kingcake desynth stats from inventory consumption; drop result was not available.");
     }
 
@@ -4518,7 +4531,22 @@ public sealed class FarmController : IDisposable
         _kingcakeDesynthConsumedUtc = null;
         _kingcakeDesynthStartCount = 0;
         _kingcakeDesynthStartDropCounts.Clear();
+        _kingcakeDesynthObservedResultDrops.Clear();
         Log($"Recorded Kingcake desynth stats ({dropList.Length} drop item(s)).");
+    }
+
+    private static List<uint> MergeDropObservations(IReadOnlyCollection<uint> resultDrops, IReadOnlyCollection<uint> inventoryDrops)
+    {
+        var merged = new List<uint>();
+        foreach (var drop in KingcakeDesynth.Drops)
+        {
+            var resultCount = resultDrops.Count(itemId => itemId == drop.ItemId);
+            var inventoryCount = inventoryDrops.Count(itemId => itemId == drop.ItemId);
+            for (var i = 0; i < Math.Max(resultCount, inventoryCount); i++)
+                merged.Add(drop.ItemId);
+        }
+
+        return merged;
     }
 
     private static Dictionary<uint, int> SnapshotKingcakeDropCounts()
