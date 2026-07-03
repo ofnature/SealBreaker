@@ -19,9 +19,25 @@ internal static class KingcakeDesynth
         new(12888, "Yak Milk", 0.20f, 1300),
     ];
 
-    public static DesynthDrop[] Drops => BaseDrops
-        .Select(drop => drop with { ItemId = ResolveItemId(drop.Name, drop.ItemId) })
-        .ToArray();
+    private static DesynthDrop[]? _resolvedDrops;
+
+    /// <summary>Sheet-resolved drops, cached after the first successful lookup — this is hit every frame by the UI.</summary>
+    public static DesynthDrop[] Drops
+    {
+        get
+        {
+            if (_resolvedDrops != null)
+                return _resolvedDrops;
+
+            if (TryResolveDrops(out var resolved))
+            {
+                _resolvedDrops = resolved;
+                return resolved;
+            }
+
+            return BaseDrops;
+        }
+    }
 
     public static uint[] MarketItemIds => Drops.Select(d => d.ItemId).ToArray();
 
@@ -36,21 +52,34 @@ internal static class KingcakeDesynth
         return null;
     }
 
-    private static uint ResolveItemId(string itemName, uint fallbackItemId)
+    /// <summary>Single pass over the Item sheet resolving all drops at once. False when Lumina is not ready yet.</summary>
+    private static bool TryResolveDrops(out DesynthDrop[] resolved)
     {
+        resolved = (DesynthDrop[])BaseDrops.Clone();
+
         try
         {
+            var indexByName = new Dictionary<string, int>(BaseDrops.Length, StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < BaseDrops.Length; i++)
+                indexByName[BaseDrops[i].Name] = i;
+
+            var remaining = indexByName.Count;
             foreach (var row in Service.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>())
             {
-                if (row.Name.ExtractText().Equals(itemName, StringComparison.OrdinalIgnoreCase))
-                    return row.RowId;
+                if (!indexByName.TryGetValue(row.Name.ExtractText(), out var idx))
+                    continue;
+
+                resolved[idx] = resolved[idx] with { ItemId = row.RowId };
+                if (--remaining == 0)
+                    break;
             }
+
+            return true;
         }
         catch
         {
-            // Fall back to the known IDs if Lumina is not ready during startup.
+            // Lumina not ready during startup — keep the known fallback IDs and retry on next access.
+            return false;
         }
-
-        return fallbackItemId;
     }
 }

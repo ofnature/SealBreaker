@@ -350,9 +350,20 @@ public sealed class MainWindow : Window, IDisposable
     private static string FormatCatalogLabel(GcShopCatalogEntry entry) =>
         $"{entry.ItemName} ({entry.SealCost} seals) — {GcShopCatalog.CategoryName(entry.CategoryTab)}";
 
+    private static bool _desynthDefaultsEnsured;
+
+    private static void EnsureDesynthDefaultsOnce(Configuration cfg)
+    {
+        if (_desynthDefaultsEnsured)
+            return;
+
+        cfg.EnsureDesynthDefaults();
+        _desynthDefaultsEnsured = true;
+    }
+
     private void DrawDesynthTab(Configuration cfg)
     {
-        cfg.EnsureDesynthDefaults();
+        EnsureDesynthDefaultsOnce(cfg);
         CompleteDesynthPriceFetch();
 
         UiTheme.SectionTitle("Kingcake desynthesis EV");
@@ -567,7 +578,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawStatsTab(Configuration cfg)
     {
-        cfg.EnsureDesynthDefaults();
+        EnsureDesynthDefaultsOnce(cfg);
         var stats = DesynthTracker.Stats;
         var ev = CalculateKingcakeEv(cfg);
 
@@ -1091,7 +1102,6 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawGcTownTab(Configuration cfg, int gcIdx)
     {
-        cfg.EnsureGcTownNav();
         var town = cfg.TownNav(gcIdx);
 
         ImGui.TextColored(ColGray, GcTownFullNames[gcIdx]);
