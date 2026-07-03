@@ -1872,6 +1872,7 @@ public sealed class MainWindow : Window, IDisposable
         var cfg = Plugin.Config;
 
         DrawPrereqChips(cfg);
+        DrawGrandCompanyLine(cfg);
         ImGui.Spacing();
 
         var dutyReady = cfg.DutyRunner == 0
@@ -1913,6 +1914,29 @@ public sealed class MainWindow : Window, IDisposable
         {
             ImGui.Spacing();
             if (UiTheme.SolidButton("Clear error", UiTheme.RedDark, new Vector2(120, 26))) ctrl.Stop();
+        }
+    }
+
+    private static void DrawGrandCompanyLine(Configuration cfg)
+    {
+        var detected = GrandCompanyState.TryGetDetected(out var gcIdx, out var rank, out var sealCap);
+        if (!detected)
+            gcIdx = cfg.GrandCompanyIndex;
+
+        UiTheme.Icon(FontAwesomeIcon.Flag, detected ? UiTheme.Accent : UiTheme.Gray);
+        ImGui.SameLine(0, 6);
+        ImGui.TextColored(UiTheme.TextBright, GrandCompanyState.GrandCompanyName(gcIdx));
+        ImGui.SameLine(0, 8);
+        ImGui.TextColored(
+            UiTheme.Gray,
+            detected
+                ? $"{GrandCompanyState.RankName(rank)} · {GcTownTabNames[gcIdx]}"
+                : $"{GcTownTabNames[gcIdx]} (rank not detected — using saved GC)");
+
+        if (detected)
+        {
+            ImGui.SameLine();
+            UiTheme.RightAlignedText($"{FarmController.GetCurrentSeals():N0} / {sealCap:N0} seals", UiTheme.Gray);
         }
     }
 
