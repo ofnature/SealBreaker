@@ -76,8 +76,8 @@ public sealed class MainWindow : Window, IDisposable
 
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(420, 520),
-            MaximumSize = new Vector2(600, 900),
+            MinimumSize = new Vector2(480, 520),
+            MaximumSize = new Vector2(1000, 1200),
         };
     }
 
@@ -1525,16 +1525,32 @@ public sealed class MainWindow : Window, IDisposable
         var moveFrom = -1;
         var moveTo = -1;
 
-        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(6, 4));
+        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(8, 5));
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(5, 3));
+
+        static float IconButtonWidth(FontAwesomeIcon icon)
+        {
+            ImGui.PushFont(UiBuilder.IconFont);
+            var glyphWidth = ImGui.CalcTextSize(icon.ToIconString()).X;
+            ImGui.PopFont();
+            return glyphWidth + ImGui.GetStyle().FramePadding.X * 2;
+        }
+
+        var actionsWidth = IconButtonWidth(FontAwesomeIcon.ArrowUp)
+                           + IconButtonWidth(FontAwesomeIcon.ArrowDown)
+                           + IconButtonWidth(FontAwesomeIcon.Edit)
+                           + IconButtonWidth(FontAwesomeIcon.Trash)
+                           + 3 * 2 + 6;
+
         if (ImGui.BeginTable("##buyListTable", 6,
                 ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.PadOuterX))
         {
-            ImGui.TableSetupColumn("##on", ImGuiTableColumnFlags.WidthFixed, 24);
+            ImGui.TableSetupColumn("##on", ImGuiTableColumnFlags.WidthFixed, 26);
             ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 48);
-            ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 44);
-            ImGui.TableSetupColumn("Have", ImGuiTableColumnFlags.WidthFixed, 48);
-            ImGui.TableSetupColumn("##actions", ImGuiTableColumnFlags.WidthFixed, 108);
+            ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 52);
+            ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 48);
+            ImGui.TableSetupColumn("Have", ImGuiTableColumnFlags.WidthFixed, 52);
+            ImGui.TableSetupColumn("##actions", ImGuiTableColumnFlags.WidthFixed, actionsWidth);
             ImGui.TableHeadersRow();
 
             for (var i = 0; i < buyList.Count; i++)
@@ -1599,7 +1615,7 @@ public sealed class MainWindow : Window, IDisposable
 
             ImGui.EndTable();
         }
-        ImGui.PopStyleVar();
+        ImGui.PopStyleVar(2);
 
         if (moveFrom >= 0 && moveTo >= 0)
         {
