@@ -16,6 +16,8 @@ Dalamud plugin (C# / .NET 10, `AllowUnsafeBlocks`, FFXIVClientStructs) that auto
 
 ### GitHub release procedure
 
+**Release on every version bump.** Users only receive code through `releases/latest` — a version bump pushed to `main` without a release ships nothing. After committing and pushing a version bump, publish the GitHub release as part of the same task (skip only if the user explicitly says to hold it).
+
 `pluginmaster.json` points at `releases/latest/download/SealBreaker.zip`, so publishing = making a new latest release:
 
 1. Build Release; zip **flat** (no folder) from `SealBreaker/bin/Release/net10.0-windows/`: `SealBreaker.dll`, `SealBreaker.json`, `icon.png`, `banner.png`, `CinzelDecorative-Bold.ttf` → `SealBreaker.zip`.
