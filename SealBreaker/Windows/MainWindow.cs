@@ -1152,16 +1152,16 @@ public sealed class MainWindow : Window, IDisposable
         var mx = town.MenderX;
         var my = town.MenderY;
         var mz = town.MenderZ;
-        ImGui.SetNextItemWidth(80);
-        if (ImGui.InputFloat("Mender X", ref mx, 0.1f, 1f, "%.2f"))
+        ImGui.SetNextItemWidth(85);
+        if (ImGui.InputFloat("Mender X", ref mx, 0f, 0f, "%.2f"))
         { town.MenderX = mx; cfg.Save(); }
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(80);
-        if (ImGui.InputFloat("Y##mender", ref my, 0.1f, 1f, "%.2f"))
+        ImGui.SetNextItemWidth(85);
+        if (ImGui.InputFloat("Y##mender", ref my, 0f, 0f, "%.2f"))
         { town.MenderY = my; cfg.Save(); }
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(80);
-        if (ImGui.InputFloat("Z##mender", ref mz, 0.1f, 1f, "%.2f"))
+        ImGui.SetNextItemWidth(85);
+        if (ImGui.InputFloat("Z##mender", ref mz, 0f, 0f, "%.2f"))
         { town.MenderZ = mz; cfg.Save(); }
 
         var target = Service.TargetManager.Target;
@@ -1285,25 +1285,25 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.PushID($"{idPrefix}{i}");
             ImGui.Text($"{i + 1}.");
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(85);
             var x = wp.X;
-            if (ImGui.InputFloat($"X##{idPrefix}", ref x, 0.1f, 1f, "%.2f"))
+            if (ImGui.InputFloat($"X##{idPrefix}", ref x, 0f, 0f, "%.2f"))
             {
                 wp.X = x;
                 cfg.Save();
             }
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(85);
             var y = wp.Y;
-            if (ImGui.InputFloat($"Y##{idPrefix}", ref y, 0.1f, 1f, "%.2f"))
+            if (ImGui.InputFloat($"Y##{idPrefix}", ref y, 0f, 0f, "%.2f"))
             {
                 wp.Y = y;
                 cfg.Save();
             }
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(85);
             var z = wp.Z;
-            if (ImGui.InputFloat($"Z##{idPrefix}", ref z, 0.1f, 1f, "%.2f"))
+            if (ImGui.InputFloat($"Z##{idPrefix}", ref z, 0f, 0f, "%.2f"))
             {
                 wp.Z = z;
                 cfg.Save();

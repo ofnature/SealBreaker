@@ -62,7 +62,7 @@ internal static class GcNavRoutes
         new(-17f, -3f, 13f),
         new(39f, -1.6f, 63f),
         new(65f, -1f, 79f),
-        new(54f, -8f, 104f),
+        new(49f, -8f, 105f), // door lineup — almost straight walk to the mender from here
         new(33f, -8f, 99f),
         GridaniaRepairPos,
     ];
