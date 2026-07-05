@@ -252,6 +252,7 @@ public sealed class FarmController : IDisposable
     private const int BuyAttemptTimeoutMs = 20_000;
     private const int BuyPhaseTimeoutMs = 180_000;
     private const int BuyFindItemMaxFailures = 8;
+    private bool _cycleCounted;
     private bool _openGcShopRetried;
     private bool _repairAllClicked;
     private bool _repairYesnoLogged;
@@ -358,7 +359,7 @@ public sealed class FarmController : IDisposable
         }
 
         IsRunning = true; TotalCycles = 0; TotalRuns = 0; TotalSeals = 0;
-        TotalDuckbones = 0; StartTime = DateTime.Now; _runsThisCycle = 0; LastError = null;
+        TotalDuckbones = 0; StartTime = DateTime.Now; _runsThisCycle = 0; _cycleCounted = false; LastError = null;
         _currentRunStart = default;
         _runClearTimes.Clear();
         _gcInitialSpend = true; _deliveryListEmpty = false; _deliveryBlockedByCap = false;
@@ -703,6 +704,7 @@ public sealed class FarmController : IDisposable
                         }
                     }
 
+                    _cycleCounted = false;
                     _currentRunStart = DateTime.Now;
                     _adsRepairAttemptedBeforeDuty = false;
                     _adsLeaveRequestedForFinalRun = false;
@@ -3079,8 +3081,15 @@ public sealed class FarmController : IDisposable
         if (agent != null && agent->IsAgentActive())
             return true;
 
-        return Service.Condition[ConditionFlag.OccupiedInEvent]
-            || Service.Condition[ConditionFlag.OccupiedInQuestEvent];
+        // Occupied only counts as a supply blocker when no other automation-owned event window
+        // explains it — the GC exchange/repair/officer menus set the same flags while legitimately open.
+        if (!Service.Condition[ConditionFlag.OccupiedInEvent]
+            && !Service.Condition[ConditionFlag.OccupiedInQuestEvent])
+            return false;
+
+        return !IsAddonVisible(GcExchangeAddon)
+            && !IsAddonVisible("Repair")
+            && !IsAddonVisible("SelectString");
     }
 
     private static unsafe string DescribeGcSupplyBlockers()
@@ -3171,8 +3180,15 @@ public sealed class FarmController : IDisposable
             return;
 
         var cfg = Plugin.Config;
-        TotalCycles++;
-        _runsThisCycle = 0;
+        // Launch attempts retry every tick (e.g. AutoDuty post-stop cooldown) — count the
+        // cycle once per boundary, not once per attempt.
+        if (!_cycleCounted)
+        {
+            TotalCycles++;
+            _runsThisCycle = 0;
+            _cycleCounted = true;
+        }
+
         await StatusAsync($"Cycle {TotalCycles}: starting run 1/{cfg.RunsPerCycle}");
 
         if (!await LaunchDutyRunnerAsync())
