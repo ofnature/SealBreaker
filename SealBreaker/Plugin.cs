@@ -23,7 +23,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly WindowSystem _windowSystem = new("SealBreaker");
     private readonly MainWindow   _mainWindow;
+    private readonly MiniWindow   _miniWindow;
     private readonly IDalamudPluginInterface _pi;
+    private static Plugin _instance = null!;
 
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
@@ -42,16 +44,19 @@ public sealed class Plugin : IDalamudPlugin
         GcShopCatalog.EnsureInitialized();
         DesynthTracker.Load();
 
+        _instance = this;
         _mainWindow = new MainWindow();
+        _miniWindow = new MiniWindow();
         _windowSystem.AddWindow(_mainWindow);
+        _windowSystem.AddWindow(_miniWindow);
 
         Service.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Seal Breaker window"
+            HelpMessage = "Open Seal Breaker window — add 'mini' for the compact widget"
         });
         Service.CommandManager.AddHandler(CommandAlias, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Seal Breaker window (short alias)"
+            HelpMessage = "Open Seal Breaker window (short alias) — /seal mini for the compact widget"
         });
 
         _pi.UiBuilder.Draw         += DrawUI;
@@ -78,8 +83,50 @@ public sealed class Plugin : IDalamudPlugin
     private static ISharedImmediateTexture? LoadTexture(string path) =>
         File.Exists(path) ? Service.TextureProvider.GetFromFile(path) : null;
 
-    private void OnCommand(string command, string args) => _mainWindow.Toggle();
+    private void OnCommand(string command, string args)
+    {
+        if (args.Trim().Equals("mini", StringComparison.OrdinalIgnoreCase))
+        {
+            _miniWindow.Toggle();
+            if (_miniWindow.IsOpen)
+                _mainWindow.IsOpen = false;
+            RememberWindowMode();
+            return;
+        }
+
+        if (Config.MiniModeActive)
+            _miniWindow.Toggle();
+        else
+            _mainWindow.Toggle();
+    }
+
+    /// <summary>Swap to the compact widget (main window title-bar minimize button).</summary>
+    public static void SwitchToMiniWindow()
+    {
+        _instance._mainWindow.IsOpen = false;
+        _instance._miniWindow.IsOpen = true;
+        _instance.RememberWindowMode();
+    }
+
+    /// <summary>Swap back to the full window (mini widget expand button).</summary>
+    public static void SwitchToFullWindow()
+    {
+        _instance._miniWindow.IsOpen = false;
+        _instance._mainWindow.IsOpen = true;
+        _instance.RememberWindowMode();
+    }
+
+    private void RememberWindowMode()
+    {
+        var mini = _miniWindow.IsOpen || (!_mainWindow.IsOpen && Config.MiniModeActive);
+        if (Config.MiniModeActive == mini)
+            return;
+
+        Config.MiniModeActive = mini;
+        Config.Save();
+    }
+
     private void DrawUI()       => _windowSystem.Draw();
-    private void DrawConfigUI() => _mainWindow.Toggle();
-    private void DrawMainUI()   => _mainWindow.Toggle();
+    private void DrawConfigUI() { _miniWindow.IsOpen = false; _mainWindow.Toggle(); }
+    private void DrawMainUI()   => OnCommand(CommandName, string.Empty);
 }

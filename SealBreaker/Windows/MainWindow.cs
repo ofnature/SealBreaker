@@ -79,6 +79,14 @@ public sealed class MainWindow : Window, IDisposable
             MinimumSize = new Vector2(480, 520),
             MaximumSize = new Vector2(1000, 1200),
         };
+
+        TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.WindowMinimize,
+            IconOffset = new Vector2(2, 1),
+            Click = _ => Plugin.SwitchToMiniWindow(),
+            ShowTooltip = () => ImGui.SetTooltip("Minimize to the mini widget"),
+        });
     }
 
     public void Dispose() => _bannerTitleFont?.Dispose();

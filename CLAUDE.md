@@ -32,7 +32,8 @@ Dalamud plugin (C# / .NET 10, `AllowUnsafeBlocks`, FFXIVClientStructs) that auto
 - `SealBreaker/Services/DutySupportCatalog.cs` — Duty Support dungeon catalog for the ADS runner (Mistwake fallback, territory 1314)
 - `SealBreaker/Services/GcShopCatalog.cs`, `GcExchangeItemResolver.cs`, `GcShopCategoryResolver.cs`, `GcShopDefaults.cs` — GC exchange sheet/catalog and buy-entry defaults
 - `SealBreaker/Services/GcNavRoutes.cs`, `MaelstromZone128Nav.cs` — GC/repair nav waypoints
-- `SealBreaker/Windows/MainWindow.cs` — ImGui UI (tabs: Farm, Config, Buy List, Desynth, Stats, GC Towns, Setup Guide)
+- `SealBreaker/Windows/MainWindow.cs` — ImGui UI (tabs: Farm, Config, Buy List, Desynth, Stats, GC Towns, Setup Guide); title-bar button minimizes to the mini widget
+- `SealBreaker/Windows/MiniWindow.cs` — compact status widget (state, run progress, Start/Stop, expand); `/seal mini` toggles it, `Configuration.MiniModeActive` remembers the last-used mode
 - `SealBreaker/Windows/UiTheme.cs` — palette + style helpers (cards, chips, metric cells, solid buttons). Use these instead of raw `PushStyleColor` for new UI.
 
 Build: `dotnet build SealBreaker/SealBreaker.csproj` (Dalamud DLLs from `%APPDATA%\XIVLauncher\addon\Hooks\`, default `15.0.2.0`).

@@ -195,6 +195,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>HaselTweaks-style: while farming or in a delivery test, the GC supply window opens directly on the Expert Delivery tab. Inactive when stopped.</summary>
     public bool OpenExpertDeliveryTabDirectly { get; set; } = true;
 
+    /// <summary>Last-used window mode — /seal reopens the mini widget when true.</summary>
+    public bool MiniModeActive { get; set; }
+
     // ── Materia extraction ────────────────────────────────────
     public bool AutoExtractMateriaEnabled { get; set; } = false;
     public bool AutoExtractMateriaBetweenRuns { get; set; } = true;
