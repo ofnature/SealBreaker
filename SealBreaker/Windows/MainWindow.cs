@@ -35,7 +35,7 @@ public sealed class MainWindow : Window, IDisposable
     private static readonly string[] GcTownFullNames =
     [
         "Maelstrom (zone 128)",
-        "Twin Adder (zone 133)",
+        "Twin Adder (zone 132)",
         "Immortal Flames (zone 130)",
     ];
 

@@ -65,7 +65,7 @@ States are in `FarmState`. High-level loop:
 - `ShouldRepairBetweenRuns()` must **not** require being in a GC officer zone; repair can navigate there first.
 - After repair: `FinishRepair` → `StartDuty` (pre-duty check runs again).
 
-GC officer zones: Maelstrom **128**, Twin Adder **133**, Immortal Flames **130** (`GcOfficerZoneId`).
+GC officer zones: Maelstrom **128**, Twin Adder **132** (New Gridania — the Adders' Nest; 133 is Old Gridania), Immortal Flames **130** (`GcOfficerZoneId`).
 Route status: Limsa and Ul'dah confirmed working; **Gridania untested**.
 
 ## GC Expert Delivery

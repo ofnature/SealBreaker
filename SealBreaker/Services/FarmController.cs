@@ -66,7 +66,7 @@ public sealed class FarmController : IDisposable
         [132, 133], // Twin Adder — New / Old Gridania
         [130, 131], // Immortal Flames — Steps of Nald / Thal
     ];
-    private static readonly uint[] GcOfficerZoneId = [128, 133, 130];
+    private static readonly uint[] GcOfficerZoneId = [128, 132, 130];
     private static readonly string[] GcCityTeleportCommand =
     [
         "Limsa Lominsa Lower Decks",
