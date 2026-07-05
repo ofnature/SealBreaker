@@ -141,6 +141,12 @@ public sealed class MainWindow : Window, IDisposable
                 ImGui.EndTabItem();
             }
 
+            if (ImGui.BeginTabItem("Log"))
+            {
+                DrawLogTab();
+                ImGui.EndTabItem();
+            }
+
             if (ImGui.BeginTabItem("GC Towns"))
             {
                 ImGui.Spacing();
@@ -1410,6 +1416,83 @@ public sealed class MainWindow : Window, IDisposable
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Enter an item ID number and click Add.");
+    }
+
+    private static readonly string[] LogFilterItems = ["Everything", "Warnings + errors", "Errors only"];
+    private int _logFilter;
+    private bool _logAutoScroll = true;
+
+    private void DrawLogTab()
+    {
+        UiTheme.SectionTitle("Session log");
+
+        var entries = FarmController.GetLogSnapshot();
+        var warnCount = 0;
+        var errorCount = 0;
+        foreach (var e in entries)
+        {
+            if (e.Severity == FarmController.LogSeverity.Warning) warnCount++;
+            else if (e.Severity == FarmController.LogSeverity.Error) errorCount++;
+        }
+
+        ImGui.SetNextItemWidth(170);
+        ImGui.Combo("##logFilter", ref _logFilter, LogFilterItems, LogFilterItems.Length);
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Auto-scroll", ref _logAutoScroll);
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Copy"))
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var e in entries)
+                sb.AppendLine($"{e.Time:HH:mm:ss} [{e.Severity}] {e.Message}");
+            ImGui.SetClipboardText(sb.ToString());
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Copy the full session log (unfiltered) to the clipboard.");
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Clear"))
+            FarmController.ClearLogBuffer();
+
+        ImGui.SameLine();
+        ImGui.TextColored(errorCount > 0 ? UiTheme.Red : UiTheme.Gray, $"{errorCount} errors");
+        ImGui.SameLine();
+        ImGui.TextColored(warnCount > 0 ? UiTheme.Yellow : UiTheme.Gray, $"{warnCount} warnings");
+
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, UiTheme.CardBg);
+        ImGui.BeginChild("##logScroll", new Vector2(0, 0), true);
+
+        if (entries.Length == 0)
+            ImGui.TextColored(UiTheme.Gray, "Nothing logged this session yet.");
+
+        foreach (var e in entries)
+        {
+            if (_logFilter == 1 && e.Severity == FarmController.LogSeverity.Info)
+                continue;
+            if (_logFilter == 2 && e.Severity != FarmController.LogSeverity.Error)
+                continue;
+
+            var color = e.Severity switch
+            {
+                FarmController.LogSeverity.Error => UiTheme.Red,
+                FarmController.LogSeverity.Warning => UiTheme.Yellow,
+                _ => UiTheme.Gray,
+            };
+
+            ImGui.TextColored(UiTheme.Gray, $"{e.Time:HH:mm:ss}");
+            ImGui.SameLine(0, 8);
+            ImGui.PushStyleColor(ImGuiCol.Text, color);
+            ImGui.TextWrapped(e.Message);
+            ImGui.PopStyleColor();
+        }
+
+        if (_logAutoScroll && ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 24)
+            ImGui.SetScrollHereY(1f);
+
+        ImGui.EndChild();
+        ImGui.PopStyleColor();
     }
 
     private static void DrawStatusPanel(FarmController ctrl)

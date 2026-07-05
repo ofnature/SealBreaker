@@ -6090,13 +6090,48 @@ public sealed class FarmController : IDisposable
         ResetDutySupportQueueState();
         CloseMateriaExtractionUi();
         LastError = msg; StatusMessage = $"ERROR: {msg}"; State = FarmState.Error; IsRunning = false;
+        AddLogEntry(LogSeverity.Error, msg);
         Service.PluginLog.Error($"[SealBreaker] {msg}");
         Service.ChatGui.PrintError($"[SealBreaker] {msg}");
     }
 
     private static void Log(string msg)
     {
+        AddLogEntry(
+            msg.StartsWith("WARN", StringComparison.OrdinalIgnoreCase) ? LogSeverity.Warning : LogSeverity.Info,
+            msg);
         Service.PluginLog.Information($"[SealBreaker] {msg}");
         if (Plugin.Config.EchoToChat) Service.ChatGui.Print($"[SealBreaker] {msg}");
+    }
+
+    // ── In-memory log for the Log tab ─────────────────────────
+
+    public enum LogSeverity { Info, Warning, Error }
+    public readonly record struct FarmLogEntry(DateTime Time, LogSeverity Severity, string Message);
+
+    private const int LogBufferMax = 500;
+    private static readonly object LogLock = new();
+    private static readonly List<FarmLogEntry> LogBuffer = new();
+
+    private static void AddLogEntry(LogSeverity severity, string msg)
+    {
+        lock (LogLock)
+        {
+            LogBuffer.Add(new FarmLogEntry(DateTime.Now, severity, msg));
+            if (LogBuffer.Count > LogBufferMax)
+                LogBuffer.RemoveRange(0, LogBuffer.Count - LogBufferMax);
+        }
+    }
+
+    public static FarmLogEntry[] GetLogSnapshot()
+    {
+        lock (LogLock)
+            return LogBuffer.ToArray();
+    }
+
+    public static void ClearLogBuffer()
+    {
+        lock (LogLock)
+            LogBuffer.Clear();
     }
 }
