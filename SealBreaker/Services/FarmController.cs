@@ -252,6 +252,7 @@ public sealed class FarmController : IDisposable
     private const int BuyAttemptTimeoutMs = 20_000;
     private const int BuyPhaseTimeoutMs = 180_000;
     private const int BuyFindItemMaxFailures = 8;
+    private bool _openGcShopRetried;
     private bool _repairAllClicked;
     private bool _repairYesnoLogged;
     private DateTime? _repairPhaseSince;
@@ -1013,6 +1014,7 @@ public sealed class FarmController : IDisposable
     private void BeginGcNavigation(FarmState finalState)
     {
         _gcNavFinalState = finalState;
+        _openGcShopRetried = false;
         IpcManager.VnavStop();
         GotoState(FarmState.TeleportToGC);
     }
@@ -1406,17 +1408,34 @@ public sealed class FarmController : IDisposable
             return;
         }
 
-        if (expectsMenu)
-            await Service.Framework.RunOnFrameworkThread(() => _expectNpcMenu = true);
-
-        await Service.Framework.RunOnFrameworkThread(() => SetTargetOnce(npcToInteract));
-        await Task.Delay(Jitter(200));
-
-        await Service.Framework.RunOnFrameworkThread(() => Interact(npcToInteract));
-        await Task.Delay(Jitter(400));
-
-        if (expectsMenu)
+        if (!expectsMenu)
         {
+            await Service.Framework.RunOnFrameworkThread(() => SetTargetOnce(npcToInteract));
+            await Task.Delay(Jitter(200));
+            await Service.Framework.RunOnFrameworkThread(() => Interact(npcToInteract));
+            await Task.Delay(Jitter(400));
+            await GotoStateAsync(nextState);
+            return;
+        }
+
+        const int maxMenuAttempts = 3;
+        for (var menuAttempt = 1; menuAttempt <= maxMenuAttempts && IsRunning; menuAttempt++)
+        {
+            // A lingering supply window/agent or the officer talk silently eats the next interaction —
+            // make sure the pipeline is genuinely torn down before talking to the NPC.
+            if (!await WaitForGcSupplyPipelineClearAsync(6000))
+            {
+                var blockers = await Service.Framework.RunOnFrameworkThread(DescribeGcSupplyBlockers);
+                await LogAsync($"WARN: GC supply UI still busy ({blockers}) — trying {npcName} anyway");
+            }
+
+            await Service.Framework.RunOnFrameworkThread(() => _expectNpcMenu = true);
+            await Service.Framework.RunOnFrameworkThread(() => SetTargetOnce(npcToInteract));
+            await Task.Delay(Jitter(200));
+
+            await Service.Framework.RunOnFrameworkThread(() => Interact(npcToInteract));
+            await Task.Delay(Jitter(400));
+
             if (await WaitForNpcMenuAsync(nextState, 8000))
             {
                 await LogAsync($"Opened {npcName} menu");
@@ -1424,12 +1443,28 @@ public sealed class FarmController : IDisposable
                 return;
             }
 
-            _expectNpcMenu = false;
-            await SetErrorAsync($"Menu did not open for {npcName}");
-            return;
+            if (menuAttempt >= maxMenuAttempts)
+                break;
+
+            await LogAsync($"WARN: {npcName} menu did not open (attempt {menuAttempt}/{maxMenuAttempts}) — clearing stuck UI and retrying");
+            await Service.Framework.RunOnFrameworkThread(CloseExpertDeliveryUiForce);
+
+            if (menuAttempt == 2)
+            {
+                // Second failure: hard reset — step away to drop any half-open interaction, then walk back.
+                await BreakNpcInteractionAsync();
+                var npcPos = await Service.Framework.RunOnFrameworkThread(() => npcToInteract.Position);
+                await VnavApproachNpcAsync(npcPos, npcName, dest);
+                await WaitForMovementStopAsync();
+            }
+
+            await Task.Delay(600);
+            npcToInteract = await Service.Framework.RunOnFrameworkThread(() =>
+                FindMaelstromGcNpc(npcName, dest) ?? FindNpcByName(npcName, dest)) ?? npcToInteract;
         }
 
-        await GotoStateAsync(nextState);
+        _expectNpcMenu = false;
+        await SetErrorAsync($"Menu did not open for {npcName} after {maxMenuAttempts} attempts");
     }
 
     private async Task WalkwayApproachNpcAsync(Vector3 dest, string npcName, Vector3 dataFallback)
@@ -2921,7 +2956,7 @@ public sealed class FarmController : IDisposable
                 anyOpen = await Service.Framework.RunOnFrameworkThread(() =>
                 {
                     CloseExpertDeliveryUiForce();
-                    return IsAnyExpertDeliveryUiOpen();
+                    return IsAnyExpertDeliveryUiOpen() || IsGcSupplyPipelineBusy();
                 });
             }
             catch (Exception ex)
@@ -2949,7 +2984,10 @@ public sealed class FarmController : IDisposable
             if (attempt == 1)
                 await LogAsync("Closing Expert Delivery UI...");
             else if (attempt % 4 == 0)
-                await LogAsync($"Still waiting for Expert Delivery UI to close ({attempt}/{maxAttempts})...");
+            {
+                var blockers = await Service.Framework.RunOnFrameworkThread(DescribeGcSupplyBlockers);
+                await LogAsync($"Still waiting for Expert Delivery UI to close ({attempt}/{maxAttempts}) — {blockers}");
+            }
 
             await Task.Delay(250);
         }
@@ -3019,8 +3057,71 @@ public sealed class FarmController : IDisposable
         if (IsAnyExpertDeliveryUiOpen())
             return true;
 
+        if (IsGcSupplyPipelineBusy())
+            return true;
+
         return IsAddonVisible("GrandCompanySupplyReward")
             || IsAddonVisible("GrandCompanySupplyList");
+    }
+
+    /// <summary>True while the GC supply UI can still eat a fresh NPC interaction. Visibility alone lies:
+    /// an addon stays allocated (invisible) mid-teardown, the supply agent can outlive the window, and the
+    /// officer talk keeps the player occupied — any of these makes the next quartermaster interact fail silently.</summary>
+    private static unsafe bool IsGcSupplyPipelineBusy()
+    {
+        if (Service.GameGui.GetAddonByName<AtkUnitBase>("GrandCompanySupplyList") != null)
+            return true;
+
+        if (Service.GameGui.GetAddonByName<AtkUnitBase>("GrandCompanySupplyReward") != null)
+            return true;
+
+        var agent = AgentGrandCompanySupply.Instance();
+        if (agent != null && agent->IsAgentActive())
+            return true;
+
+        return Service.Condition[ConditionFlag.OccupiedInEvent]
+            || Service.Condition[ConditionFlag.OccupiedInQuestEvent];
+    }
+
+    private static unsafe string DescribeGcSupplyBlockers()
+    {
+        var parts = new List<string>();
+        if (Service.GameGui.GetAddonByName<AtkUnitBase>("GrandCompanySupplyList") != null)
+            parts.Add("SupplyList allocated");
+        if (Service.GameGui.GetAddonByName<AtkUnitBase>("GrandCompanySupplyReward") != null)
+            parts.Add("SupplyReward allocated");
+        var agent = AgentGrandCompanySupply.Instance();
+        if (agent != null && agent->IsAgentActive())
+            parts.Add("supply agent active");
+        if (Service.Condition[ConditionFlag.OccupiedInEvent])
+            parts.Add("OccupiedInEvent");
+        if (Service.Condition[ConditionFlag.OccupiedInQuestEvent])
+            parts.Add("OccupiedInQuestEvent");
+        return parts.Count == 0 ? "clear" : string.Join(", ", parts);
+    }
+
+    /// <summary>Force-close and wait until the supply pipeline is fully torn down. False on timeout.</summary>
+    private async Task<bool> WaitForGcSupplyPipelineClearAsync(int timeoutMs)
+    {
+        var deadline = DateTime.Now.AddMilliseconds(timeoutMs);
+        while (DateTime.Now < deadline && IsRunning)
+        {
+            var busy = await Service.Framework.RunOnFrameworkThread(() =>
+            {
+                if (!IsGcSupplyPipelineBusy() && !IsAnyExpertDeliveryUiOpen())
+                    return false;
+
+                CloseExpertDeliveryUiForce();
+                return true;
+            });
+
+            if (!busy)
+                return true;
+
+            await Task.Delay(200);
+        }
+
+        return false;
     }
 
     private async Task BreakNpcInteractionAsync()
@@ -4084,11 +4185,23 @@ public sealed class FarmController : IDisposable
         {
             _expectNpcMenu = false;
             await Service.Framework.RunOnFrameworkThread(() => CloseAddonSafe("SelectString"));
+
+            if (!_openGcShopRetried && IsRunning)
+            {
+                _openGcShopRetried = true;
+                await LogAsync("WARN: GC exchange did not open — clearing stuck UI and re-approaching the quartermaster");
+                await WaitForGcSupplyPipelineClearAsync(8000);
+                await BreakNpcInteractionAsync();
+                await GotoStateAsync(FarmState.NavigateToShop);
+                return;
+            }
+
             await SetErrorAsync("GC exchange did not open");
             return;
         }
 
         _expectNpcMenu = false;
+        _openGcShopRetried = false;
 
         await Service.Framework.RunOnFrameworkThread(() => CloseAddonSafe("SelectString"));
         _gcActionCooldownUntil = DateTime.MinValue;

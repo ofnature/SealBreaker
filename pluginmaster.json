@@ -3,7 +3,7 @@
     "Author": "ofnature",
     "Name": "SealBreaker",
     "InternalName": "SealBreaker",
-    "AssemblyVersion": "1.0.0.94",
+    "AssemblyVersion": "1.0.0.95",
     "Description": "Automates dungeon farming, GC expert delivery, and grand company item purchasing. Supports AutoDuty and ADS.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/ofnature/SealBreaker",
@@ -14,7 +14,7 @@
     "DownloadLinkTesting": "https://github.com/ofnature/SealBreaker/releases/latest/download/SealBreaker.zip",
     "IconUrl": "https://raw.githubusercontent.com/ofnature/SealBreaker/main/SealBreaker/icon.png",
     "DownloadCount": 0,
-    "LastUpdate": 1783258986,
+    "LastUpdate": 1783276829,
     "IsHide": false,
     "IsTestingExclusive": false
   }
