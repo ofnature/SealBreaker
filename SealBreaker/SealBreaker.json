@@ -4,7 +4,7 @@
   "Punchline": "Automates duty farming, GC turn-ins, and Duckbone buying.",
   "Description": "Automates dungeon farming, GC expert delivery, and grand company item purchasing. Supports AutoDuty and ADS.",
   "InternalName": "SealBreaker",
-  "AssemblyVersion": "1.0.0.97",
+  "AssemblyVersion": "1.0.0.98",
   "RepoUrl": "https://github.com/ofnature/SealBreaker",
   "IconUrl": "https://raw.githubusercontent.com/ofnature/SealBreaker/main/SealBreaker/icon.png",
   "ApplicableVersion": "any",
