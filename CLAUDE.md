@@ -7,7 +7,7 @@ Dalamud plugin (C# / .NET 10, `AllowUnsafeBlocks`, FFXIVClientStructs) that auto
 - Bug fixes increment the 4th digit: `1.0.0.x`.
 - Major feature releases increment the 2nd digit and reset 3rd/4th: `1.x.0.0`.
 - **Never increment the 3rd digit** — it is reserved.
-- Current target: `1.1.0.0` once all 3 Grand Companies are confirmed working (Gridania still needs testing).
+- `1.1.0.0` shipped 2026-07-05 — all 3 Grand Companies confirmed working. Bug fixes continue as `1.1.0.x`; the next 2nd-digit bump needs a comparable feature milestone.
 - On every bump, update **all three files together**:
   - `SealBreaker/SealBreaker.csproj` (`Version`, `AssemblyVersion`, `FileVersion` — identical four-part strings)
   - `SealBreaker/SealBreaker.json` (`AssemblyVersion`)
@@ -69,7 +69,7 @@ States are in `FarmState`. High-level loop:
 - After repair: `FinishRepair` → `StartDuty` (pre-duty check runs again).
 
 GC officer zones: Maelstrom **128**, Twin Adder **132** (New Gridania — the Adders' Nest; 133 is Old Gridania), Immortal Flames **130** (`GcOfficerZoneId`).
-Route status: Limsa and Ul'dah confirmed working; **Gridania untested**.
+Route status: all three GC towns confirmed working (Limsa, Gridania, Ul'dah — verified 2026-07-05).
 
 ## GC Expert Delivery
 
