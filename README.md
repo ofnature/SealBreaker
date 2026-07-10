@@ -17,13 +17,13 @@ Extras: automatic repairs (mender route or ADS), materia extraction, Kingcake de
 1. In game, run `/xlsettings` → **Experimental** tab
 2. Under **Custom Plugin Repositories**, add:
    ```
-   https://raw.githubusercontent.com/ofnature/SealBreaker/main/pluginmaster.json
+   https://raw.githubusercontent.com/ofnature/Daedalus/main/repo.json
    ```
 3. Click the **+** then **Save and Close**
 4. Open `/xlplugins`, search for **SealBreaker**, and install
 5. Open the window with `/seal` (or `/sealbreaker`)
 
-Updates are delivered through the same repo automatically.
+Updates are delivered through the same repo automatically. The same URL also serves [Daedalus](https://github.com/ofnature/Daedalus) and [Charon](https://github.com/ofnature/Charon).
 
 ## Requirements
 
