@@ -385,6 +385,13 @@ public sealed class FarmController : IDisposable
             Plugin.Config.Save();
             Log("Runs per cycle reset to 1 — multi-run is not unlocked (Farm tab).");
         }
+        if (Plugin.Config.DutyRunner == 0
+            && Plugin.Config.RepairEnabled
+            && IpcManager.AutoDutyAutoRepairEnabled() == true)
+        {
+            Log("WARN: AutoDuty's Auto Repair is enabled — it conflicts with SealBreaker's repair. Disable it on the Config tab (Repair section) or in AutoDuty.");
+        }
+
         GotoState(FarmState.CheckSealSpend);
         Log($"SealBreaker v{PluginVersion} started — current seals: {GetCurrentSeals():N0}");
     }

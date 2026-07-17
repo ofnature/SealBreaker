@@ -76,8 +76,8 @@ public sealed class MainWindow : Window, IDisposable
 
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(480, 520),
-            MaximumSize = new Vector2(1000, 1200),
+            MinimumSize = new Vector2(580, 540),
+            MaximumSize = new Vector2(1100, 1200),
         };
 
         TitleBarButtons.Add(new TitleBarButton
@@ -104,83 +104,407 @@ public sealed class MainWindow : Window, IDisposable
         if (cfg.ShowWindowBanner)
             DrawPluginBanner();
 
-        if (ImGui.BeginTabBar("##sealbreakerTabs"))
+        DrawConfigSearch();
+        DrawStatusHeader(ctrl, cfg);
+
+        var availHeight = ImGui.GetContentRegionAvail().Y;
+
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, UiTheme.NavBg);
+        ImGui.BeginChild("##sbSidebar", new Vector2(SidebarWidth, availHeight), false);
+        DrawSidebar(cfg, ctrl);
+        ImGui.EndChild();
+        ImGui.PopStyleColor();
+
+        ImGui.SameLine(0, 4);
+
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, UiTheme.ContentBg);
+        ImGui.BeginChild("##sbContent", new Vector2(0, availHeight), true);
+        DrawSectionHeader(cfg);
+        DrawCurrentSection(cfg, ctrl);
+        ImGui.EndChild();
+        ImGui.PopStyleColor();
+    }
+
+    // ── Sidebar shell ─────────────────────────────────────────
+
+    private enum SbSection
+    {
+        Dashboard, Duty, FarmSettings, ItemFilter,
+        BuyList, Repair, Towns, Materia,
+        DesynthEv, DesynthStats,
+        Log, General, SetupGuide,
+    }
+
+    private const float SidebarWidth = 150f;
+    private SbSection _section = SbSection.Dashboard;
+    private string _configSearch = string.Empty;
+    private HashSet<SbSection>? _searchMatches;
+
+    private static readonly Dictionary<SbSection, (string Title, string Sub, string Keywords)> SectionMeta = new()
+    {
+        [SbSection.Dashboard]    = ("Dashboard", "status, metrics, start and tests", "dashboard status metrics seals runs cycles start stop tests delivery shop repair extract kingcake"),
+        [SbSection.Duty]         = ("Duty", "which dungeon the farm runs", "duty runner autoduty ads dungeon mistwake mode support trust squadron regular free trial path"),
+        [SbSection.FarmSettings] = ("Farm settings", "cycle and session limits", "runs per cycle multi run unlock risk total run limit stop after echo chat"),
+        [SbSection.ItemFilter]   = ("Item filter", "what gets turned in", "item filter blacklist whitelist protected ids list mode deliver turn in"),
+        [SbSection.BuyList]      = ("Buy list", "what seals are spent on", "buy list duck bones kingcake aetheryte ticket catalog keep quantity seal cost rank shop"),
+        [SbSection.Repair]       = ("Repair", "gear repair between cycles", "repair mender threshold condition ads self npc autoduty auto repair durability"),
+        [SbSection.Towns]        = ("Towns & routes", "per-town navigation tuning", "town route waypoint mender limsa gridania uldah approach corridor navigation"),
+        [SbSection.Materia]      = ("Materia extraction", "extract from spiritbound gear", "materia extraction spiritbond extract equipped gear"),
+        [SbSection.DesynthEv]    = ("Kingcake EV", "desynth expected value", "desynth kingcake ev expected value universalis prices moogle projection gil"),
+        [SbSection.DesynthStats] = ("Statistics", "observed desynth results", "statistics desynth observed drop rate export csv confidence"),
+        [SbSection.Log]          = ("Log", "what happened this session", "log errors warnings session copy clear"),
+        [SbSection.General]      = ("General", "window and misc behavior", "general banner officer menu dismiss expert delivery tab grand company override seal cap reserve"),
+        [SbSection.SetupGuide]   = ("Setup guide", "first-run checklist", "setup guide plugins first run checklist help install"),
+    };
+
+    private void DrawConfigSearch()
+    {
+        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - 26);
+        if (ImGui.InputTextWithHint("##sbSearch", "Search settings...", ref _configSearch, 128))
+            UpdateConfigSearch();
+
+        ImGui.SameLine();
+        if (!string.IsNullOrEmpty(_configSearch))
         {
-            if (ImGui.BeginTabItem("Farm"))
+            if (ImGuiComponents.IconButton(FontAwesomeIcon.Times))
             {
-                ImGui.Spacing();
+                _configSearch = string.Empty;
+                _searchMatches = null;
+            }
+        }
+        else
+        {
+            UiTheme.Icon(FontAwesomeIcon.Search, UiTheme.NavHeader);
+        }
+
+        if (!string.IsNullOrEmpty(_configSearch))
+        {
+            var count = _searchMatches?.Count ?? 0;
+            if (count == 0)
+                ImGui.TextColored(UiTheme.Red, "No sections match");
+            else
+                ImGui.TextDisabled($"{count} section(s) match");
+        }
+    }
+
+    private void UpdateConfigSearch()
+    {
+        if (string.IsNullOrWhiteSpace(_configSearch))
+        {
+            _searchMatches = null;
+            return;
+        }
+
+        var query = _configSearch.Trim();
+        _searchMatches = [];
+        foreach (var (section, meta) in SectionMeta)
+        {
+            if (meta.Title.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || meta.Keywords.Contains(query, StringComparison.OrdinalIgnoreCase))
+                _searchMatches.Add(section);
+        }
+
+        if (_searchMatches.Count > 0 && !_searchMatches.Contains(_section))
+        {
+            foreach (var s in _searchMatches)
+            {
+                _section = s;
+                break;
+            }
+        }
+    }
+
+    private void DrawStatusHeader(FarmController ctrl, Configuration cfg)
+    {
+        var (label, col) = ctrl.State switch
+        {
+            FarmController.FarmState.Idle  => ("Idle",    UiTheme.Gray),
+            FarmController.FarmState.Error => ("Error",   UiTheme.Red),
+            _                              => ("Running", UiTheme.Green),
+        };
+
+        UiTheme.StatusDot(col);
+        ImGui.SameLine(0, 5);
+        ImGui.TextColored(col, label);
+
+        ImGui.SameLine(0, 8);
+        var dutyName = cfg.DutyRunner == 0
+            ? AutoDutyCatalog.SelectedOrDefault(cfg).Name
+            : DutySupportCatalog.SelectedOrDefault(cfg).Name;
+        ImGui.TextColored(UiTheme.TextBright, dutyName);
+
+        ImGui.SameLine(0, 8);
+        var runnerLabel = cfg.DutyRunner == 0
+            ? cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty"
+            : "ADS";
+        ImGui.TextColored(UiTheme.Gray, runnerLabel);
+
+        if (ctrl.IsRunning && !ctrl.IsAnyTestMode)
+        {
+            ImGui.SameLine(0, 10);
+            var runText = $"Run {Math.Min(ctrl.RunsThisCycle + 1, cfg.RunsPerCycle)}/{cfg.RunsPerCycle}";
+            if (cfg.TotalRunLimit > 0)
+                runText += $" · {ctrl.TotalRuns}/{cfg.TotalRunLimit} total";
+            ImGui.TextColored(UiTheme.Gray, runText);
+
+            var elapsed = DateTime.Now - ctrl.StartTime;
+            ImGui.SameLine(0, 10);
+            ImGui.TextColored(UiTheme.NavHeader, $"{elapsed:hh\\:mm\\:ss}");
+        }
+
+        // Compact Start/Stop pinned to the right edge of the header row.
+        ImGui.SameLine();
+        const float headerButtonWidth = 64f;
+        var avail = ImGui.GetContentRegionAvail().X;
+        if (avail > headerButtonWidth)
+            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + avail - headerButtonWidth);
+
+        if (ctrl.IsRunning)
+        {
+            if (UiTheme.StopButton("Stop##hdr", new Vector2(headerButtonWidth, 22))) ctrl.Stop();
+        }
+        else
+        {
+            var dutyReady = cfg.DutyRunner == 0 ? IpcManager.AutoDutyAvailable : IpcManager.AdsAvailable;
+            var allReady = dutyReady && IpcManager.VnavAvailable && IpcManager.LifestreamAvailable;
+            if (!allReady) ImGui.BeginDisabled();
+            if (UiTheme.StartButton("Start##hdr", new Vector2(headerButtonWidth, 22))) ctrl.Start();
+            if (!allReady) ImGui.EndDisabled();
+        }
+
+        if (ctrl.StopAfterRunRequested)
+        {
+            UiTheme.Icon(FontAwesomeIcon.FlagCheckered, UiTheme.Yellow);
+            ImGui.SameLine(0, 6);
+            ImGui.TextColored(UiTheme.Yellow, "Stopping after the current run finishes");
+        }
+
+        if (ctrl.LastError != null)
+            ImGui.TextColored(UiTheme.Red, ctrl.LastError.Length > 90 ? ctrl.LastError[..90] + "..." : ctrl.LastError);
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+    }
+
+    private void DrawSidebar(Configuration cfg, FarmController ctrl)
+    {
+        ImGui.Dummy(new Vector2(0, 4));
+
+        DrawNavCategory("FARM", [SbSection.Dashboard, SbSection.Duty, SbSection.FarmSettings, SbSection.ItemFilter], cfg, ctrl);
+        DrawNavCategory("GRAND COMPANY", [SbSection.BuyList, SbSection.Repair, SbSection.Towns, SbSection.Materia], cfg, ctrl);
+        DrawNavCategory("DESYNTH", [SbSection.DesynthEv, SbSection.DesynthStats], cfg, ctrl);
+        DrawNavCategory("SYSTEM", [SbSection.Log, SbSection.General, SbSection.SetupGuide], cfg, ctrl);
+    }
+
+    private void DrawNavCategory(string header, SbSection[] sections, Configuration cfg, FarmController ctrl)
+    {
+        var searching = _searchMatches != null;
+        if (searching && !sections.Any(s => _searchMatches!.Contains(s)))
+            return;
+
+        ImGui.Indent(10);
+        ImGui.TextColored(UiTheme.NavHeader, header);
+        ImGui.Unindent(10);
+
+        foreach (var section in sections)
+        {
+            if (searching && !_searchMatches!.Contains(section))
+                continue;
+
+            DrawNavItem(section, cfg, ctrl);
+        }
+
+        ImGui.Dummy(new Vector2(0, 6));
+    }
+
+    private void DrawNavItem(SbSection section, Configuration cfg, FarmController ctrl)
+    {
+        var selected = _section == section;
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetCursorScreenPos();
+        var rowHeight = ImGui.GetTextLineHeightWithSpacing();
+
+        if (selected)
+        {
+            drawList.AddRectFilled(pos, new Vector2(pos.X + SidebarWidth, pos.Y + rowHeight),
+                ImGui.ColorConvertFloat4ToU32(UiTheme.TealWash));
+            drawList.AddRectFilled(pos, new Vector2(pos.X + 2f, pos.Y + rowHeight),
+                ImGui.ColorConvertFloat4ToU32(UiTheme.Teal));
+        }
+
+        ImGui.PushStyleColor(ImGuiCol.Text, selected ? UiTheme.Accent : UiTheme.NavText);
+        ImGui.PushStyleColor(ImGuiCol.Header, UiTheme.TealWash);
+        ImGui.PushStyleColor(ImGuiCol.HeaderHovered, UiTheme.TealWash);
+        ImGui.PushStyleColor(ImGuiCol.HeaderActive, UiTheme.TealWash);
+
+        var clicked = ImGui.Selectable($"   {SectionMeta[section].Title}##nav{section}", selected);
+        ImGui.PopStyleColor(4);
+
+        DrawNavBadge(section, cfg, drawList);
+
+        if (clicked)
+            _section = section;
+    }
+
+    private static void DrawNavBadge(SbSection section, Configuration cfg, ImDrawListPtr drawList)
+    {
+        string? badge = null;
+        var color = UiTheme.Teal;
+
+        switch (section)
+        {
+            case SbSection.BuyList:
+                badge = GcTownTabNames[cfg.GrandCompanyIndex];
+                break;
+            case SbSection.Log:
+            {
+                var errors = 0;
+                foreach (var e in FarmController.GetLogSnapshot())
+                {
+                    if (e.Severity == FarmController.LogSeverity.Error)
+                        errors++;
+                }
+
+                if (errors > 0)
+                {
+                    badge = errors.ToString();
+                    color = UiTheme.Red;
+                }
+
+                break;
+            }
+        }
+
+        if (badge == null)
+            return;
+
+        var min = ImGui.GetItemRectMin();
+        var max = ImGui.GetItemRectMax();
+        var size = ImGui.CalcTextSize(badge);
+        drawList.AddText(
+            new Vector2(max.X - size.X - 8, min.Y + (max.Y - min.Y - size.Y) / 2f),
+            ImGui.ColorConvertFloat4ToU32(color),
+            badge);
+    }
+
+    private void DrawSectionHeader(Configuration cfg)
+    {
+        var meta = SectionMeta[_section];
+        ImGui.TextColored(UiTheme.Accent, meta.Title);
+        ImGui.SameLine(0, 8);
+        ImGui.TextColored(UiTheme.NavHeader, meta.Sub);
+
+        var chip = SectionChip(cfg);
+        if (chip is var (chipText, chipColor) && chipText != null)
+        {
+            ImGui.SameLine();
+            var width = ImGui.CalcTextSize(chipText).X;
+            var avail = ImGui.GetContentRegionAvail().X;
+            if (avail > width)
+                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + avail - width);
+            ImGui.TextColored(chipColor, chipText);
+        }
+
+        UiTheme.GoldFadeRule();
+        ImGui.Spacing();
+    }
+
+    private (string?, Vector4) SectionChip(Configuration cfg)
+    {
+        switch (_section)
+        {
+            case SbSection.Duty when cfg.DutyRunner == 0 && IpcManager.AutoDutyAvailable:
+            {
+                var duty = AutoDutyCatalog.SelectedOrDefault(cfg);
+                var now = DateTime.UtcNow;
+                if (_autoDutyPathCheckTerritory != duty.TerritoryType || now - _autoDutyPathCheckAt > TimeSpan.FromSeconds(5))
+                {
+                    _autoDutyPathCheckTerritory = duty.TerritoryType;
+                    _autoDutyPathCheckResult = IpcManager.AutoDutyContentHasPath(duty.TerritoryType);
+                    _autoDutyPathCheckAt = now;
+                }
+
+                return _autoDutyPathCheckResult ? ("● path OK", UiTheme.Teal) : ("● no path", UiTheme.Red);
+            }
+            case SbSection.BuyList:
+                return ($"● {GcTownTabNames[cfg.GrandCompanyIndex]} active", UiTheme.Teal);
+            case SbSection.Repair when AutoDutyRepairConflict(cfg):
+                return ("● AutoDuty conflict", UiTheme.Yellow);
+            default:
+                return (null, UiTheme.Gray);
+        }
+    }
+
+    private void DrawCurrentSection(Configuration cfg, FarmController ctrl)
+    {
+        switch (_section)
+        {
+            case SbSection.Dashboard:
                 DrawStatusPanel(ctrl);
                 DrawStatsPanel(ctrl);
                 DrawControlButtons(ctrl);
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("Config"))
-            {
-                DrawFarmTab(cfg);
-                ImGui.Separator();
-                DrawConfigTab(cfg);
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("Buy List"))
-            {
+                break;
+            case SbSection.Duty:
+                DrawDutySection(cfg);
+                break;
+            case SbSection.FarmSettings:
+                DrawFarmSettingsSection(cfg);
+                break;
+            case SbSection.ItemFilter:
+                DrawFilterPanel(cfg);
+                break;
+            case SbSection.BuyList:
                 DrawBuyListTab(cfg);
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("Desynth"))
-            {
+                break;
+            case SbSection.Repair:
+                DrawRepairConfigSection(cfg);
+                break;
+            case SbSection.Towns:
+                DrawTownsSection(cfg);
+                break;
+            case SbSection.Materia:
+                DrawMateriaExtractionSection(cfg);
+                break;
+            case SbSection.DesynthEv:
                 DrawDesynthTab(cfg);
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("Stats"))
-            {
+                break;
+            case SbSection.DesynthStats:
                 DrawStatsTab(cfg);
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("Log"))
-            {
+                break;
+            case SbSection.Log:
                 DrawLogTab();
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("GC Towns"))
-            {
-                ImGui.Spacing();
-                if (ImGui.BeginTabBar("##gcTownTabs"))
-                {
-                    foreach (var gcIdx in GcTownTopLevelTabOrder)
-                    {
-                        var isActive = gcIdx == cfg.GrandCompanyIndex;
-                        var label = $"{GcTownTabNames[gcIdx]}{(isActive ? " (active)" : "")}###gcTownTab{gcIdx}";
-                        var flags = isActive && _gcTownSyncedGc != cfg.GrandCompanyIndex
-                            ? ImGuiTabItemFlags.SetSelected
-                            : ImGuiTabItemFlags.None;
-
-                        if (ImGui.BeginTabItem(label, flags))
-                        {
-                            DrawGcTownTab(cfg, gcIdx);
-                            ImGui.EndTabItem();
-                        }
-                    }
-
-                    ImGui.EndTabBar();
-                    _gcTownSyncedGc = cfg.GrandCompanyIndex;
-                }
-
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("Setup Guide"))
-            {
+                break;
+            case SbSection.General:
+                DrawGeneralSection(cfg);
+                break;
+            case SbSection.SetupGuide:
                 DrawSetupGuide(cfg);
-                ImGui.EndTabItem();
+                break;
+        }
+    }
+
+    private void DrawTownsSection(Configuration cfg)
+    {
+        if (ImGui.BeginTabBar("##gcTownTabs"))
+        {
+            foreach (var gcIdx in GcTownTopLevelTabOrder)
+            {
+                var isActive = gcIdx == cfg.GrandCompanyIndex;
+                var label = $"{GcTownTabNames[gcIdx]}{(isActive ? " (active)" : "")}###gcTownTab{gcIdx}";
+                var flags = isActive && _gcTownSyncedGc != cfg.GrandCompanyIndex
+                    ? ImGuiTabItemFlags.SetSelected
+                    : ImGuiTabItemFlags.None;
+
+                if (ImGui.BeginTabItem(label, flags))
+                {
+                    DrawGcTownTab(cfg, gcIdx);
+                    ImGui.EndTabItem();
+                }
             }
 
             ImGui.EndTabBar();
+            _gcTownSyncedGc = cfg.GrandCompanyIndex;
         }
     }
 
@@ -262,10 +586,8 @@ public sealed class MainWindow : Window, IDisposable
             text);
     }
 
-    private void DrawFarmTab(Configuration cfg)
+    private void DrawFarmSettingsSection(Configuration cfg)
     {
-        UiTheme.SectionTitle("Farm settings");
-
         var unlocked = cfg.AllowMultiRunPerCycle;
         if (ImGui.Checkbox("Unlock multiple runs per cycle", ref unlocked))
         {
@@ -328,15 +650,12 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("0 = run endlessly. Otherwise the farm finishes that run's GC turn-in/buying, then stops gracefully.");
 
-        if (ImGui.CollapsingHeader("Item filter"))
-            DrawFilterPanel(cfg);
-
         var echo = cfg.EchoToChat;
         if (ImGui.Checkbox("Echo log to chat", ref echo))
         { cfg.EchoToChat = echo; cfg.Save(); }
 
         ImGui.Spacing();
-        ImGui.TextColored(ColGray, $"GC town routes: GC Towns tab → {GcTownTabNames[cfg.GrandCompanyIndex]} (active GC).");
+        ImGui.TextColored(ColGray, "Item filter has its own section; town routes live under Grand Company → Towns & routes.");
     }
 
     private static int _buyListSyncedGc = -1;
@@ -345,10 +664,9 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawBuyListTab(Configuration cfg)
     {
-        UiTheme.SectionTitle("GC shop buy list");
         ImGui.TextWrapped("Priority order: buy each item until Keep is reached, then move to the next entry.");
         ImGui.TextDisabled("Keep 0 = spend seals on that item until reserve, then try the next entry.");
-        ImGui.TextDisabled($"Seal reserve (Config tab): {cfg.SealReserve:N0} — buying stops when seals reach this amount.");
+        ImGui.TextDisabled($"Seal reserve (General section): {cfg.SealReserve:N0} — buying stops when seals reach this amount.");
 
         var activeGc = cfg.GrandCompanyIndex;
         ImGui.TextColored(UiTheme.Green, $"Farm buys from the {GcTownTabNames[activeGc]} list ({GrandCompanyState.GrandCompanyName(activeGc)}).");
@@ -487,7 +805,6 @@ public sealed class MainWindow : Window, IDisposable
         EnsureDesynthDefaultsOnce(cfg);
         CompleteDesynthPriceFetch();
 
-        UiTheme.SectionTitle("Kingcake desynthesis EV");
         ImGui.TextDisabled("Prices: Universalis public API, Maduin. Offline/fallback values are used when live prices are missing.");
 
         ImGui.Spacing();
@@ -703,7 +1020,6 @@ public sealed class MainWindow : Window, IDisposable
         var stats = DesynthTracker.Stats;
         var ev = CalculateKingcakeEv(cfg);
 
-        UiTheme.SectionTitle("Kingcake desynth statistics");
         ImGui.TextDisabled("Stats are persisted to DesynthStats.json in the SealBreaker plugin config folder.");
         ImGui.Text($"Total Kingcakes desynthed: {stats.TotalKingcakesDesynthed:N0}");
         ImGui.Text($"Observed total value: {CalculateObservedDesynthValue(cfg):N0} gil");
@@ -845,13 +1161,12 @@ public sealed class MainWindow : Window, IDisposable
         return variance > 0 ? ColGreen : ColYellow;
     }
 
-    private static void DrawConfigTab(Configuration cfg)
+    private static void DrawDutySection(Configuration cfg)
     {
-        UiTheme.SectionTitle("General configuration");
-
         var runnerItems = new[] { "AutoDuty", "ADS (AI Duty Solver)" };
         var runner = cfg.DutyRunner;
-        if (ImGui.Combo("Duty Runner", ref runner, runnerItems, runnerItems.Length))
+        ImGui.SetNextItemWidth(240);
+        if (ImGui.Combo("Duty runner", ref runner, runnerItems, runnerItems.Length))
         {
             cfg.DutyRunner = runner;
             cfg.Save();
@@ -860,6 +1175,16 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Select which plugin handles dungeon automation.");
 
+        ImGui.Spacing();
+
+        if (cfg.DutyRunner == 0)
+            DrawAutoDutyDutySection(cfg);
+        else
+            DrawAdsDutySupportSection(cfg);
+    }
+
+    private static void DrawGeneralSection(Configuration cfg)
+    {
         var showWindowBanner = cfg.ShowWindowBanner;
         if (ImGui.Checkbox("Show window banner", ref showWindowBanner))
         {
@@ -868,17 +1193,6 @@ public sealed class MainWindow : Window, IDisposable
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Disable this if the banner image or custom title font causes display/rendering issues.");
-
-        if (cfg.DutyRunner == 0 && ImGui.CollapsingHeader("AutoDuty Dungeon", ImGuiTreeNodeFlags.DefaultOpen))
-            DrawAutoDutyDutySection(cfg);
-
-        if (cfg.DutyRunner == 1 && ImGui.CollapsingHeader("ADS Duty Support", ImGuiTreeNodeFlags.DefaultOpen))
-            DrawAdsDutySupportSection(cfg);
-
-        if (ImGui.CollapsingHeader("Repair", ImGuiTreeNodeFlags.DefaultOpen))
-            DrawRepairConfigSection(cfg);
-
-        DrawGrandCompanyOverrideSection(cfg);
 
         var autoDismiss = cfg.AutoDismissGcOfficerMenu;
         if (ImGui.Checkbox("Auto-close GC officer menus", ref autoDismiss))
@@ -893,8 +1207,7 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.SetTooltip("While the farm or a delivery test is running, the GC Delivery Missions window opens straight on the Expert Delivery tab (HaselTweaks-style).\nAutomatically inactive once the farm is stopped, so manual use is untouched.");
 
         ImGui.Spacing();
-        if (ImGui.CollapsingHeader("Materia extraction"))
-            DrawMateriaExtractionSection(cfg);
+        DrawGrandCompanyOverrideSection(cfg);
     }
 
     private static void DrawGrandCompanyOverrideSection(Configuration cfg)
@@ -1031,6 +1344,20 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.TextDisabled($"Configure mender and repair route on the GC Towns tab ({GcTownTabNames[cfg.GrandCompanyIndex]}).");
         }
 
+        if (AutoDutyRepairConflict(cfg))
+        {
+            UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Yellow);
+            ImGui.SameLine(0, 6);
+            ImGui.TextColored(UiTheme.Yellow, "AutoDuty's own Auto Repair is enabled — both plugins will fight over repairs.");
+            if (UiTheme.SolidButton("Disable AutoDuty Auto Repair", UiTheme.YellowDark, new Vector2(220, 24)))
+            {
+                if (IpcManager.AutoDutySetConfig("AutoRepair", "false"))
+                    _adAutoRepairCheckAt = DateTime.MinValue;
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Turns off AutoDuty's AutoRepair setting via IPC. SealBreaker's mender-route repair takes over.");
+        }
+
         if (!cfg.RepairEnabled)
             ImGui.EndDisabled();
     }
@@ -1137,6 +1464,7 @@ public sealed class MainWindow : Window, IDisposable
             DrawGuideWarning("Disable auto-equip new gear: Character Config → Item Settings → Equip Retrieved Gear → OFF — gear must stay in your bags for Expert Delivery to see it");
             DrawGuideWarning("Ensure your Grand Company rank is high enough for Expert Delivery (Second Lieutenant or above)");
             DrawGuideWarning("Make sure your inventory has free space before starting — a full inventory will cause drops to be lost");
+            DrawGuideWarning("Using AutoDuty with SealBreaker repair? Turn OFF AutoDuty's own Auto Repair — the Config tab's Repair section warns about the conflict and can disable it for you");
         }
 
         using (UiTheme.Card())
@@ -1150,11 +1478,12 @@ public sealed class MainWindow : Window, IDisposable
         using (UiTheme.Card())
         {
             UiTheme.SectionTitle("Step 4 — First run checklist");
-            DrawGuideCheck("Set Runs Per Cycle to 1 for your first test run");
+            DrawGuideCheck("Runs per cycle is locked to 1 by default — the safe loop: run → deliver → buy → repair/extract → repeat");
             DrawGuideCheck("Set List Mode to Off so all gear is turned in automatically");
-            DrawGuideCheck("Click Start and watch the Farm tab log output");
+            DrawGuideCheck("Click Start and watch the Log tab — warnings and errors show up there");
             DrawGuideCheck("Verify: zones into dungeon → completes run → teleports to GC → delivers gear → buys items → loops");
-            DrawGuideCheck("Once confirmed working, increase Runs Per Cycle and configure your item filter");
+            DrawGuideCheck("Once confirmed working, configure your item filter; optionally set 'Stop after N total runs' for capped sessions");
+            DrawGuideCheck("Multi-run cycles are opt-in on the Farm tab and show a risk warning — the single-run loop is the supported path");
         }
 
         using (UiTheme.Card())
@@ -1531,8 +1860,6 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawLogTab()
     {
-        UiTheme.SectionTitle("Session log");
-
         var entries = FarmController.GetLogSnapshot();
         var warnCount = 0;
         var errorCount = 0;
@@ -2192,6 +2519,25 @@ public sealed class MainWindow : Window, IDisposable
         }
     }
 
+    private static bool? _adAutoRepairEnabled;
+    private static DateTime _adAutoRepairCheckAt = DateTime.MinValue;
+
+    /// <summary>Cached AutoDuty AutoRepair state — one IPC read every 5s instead of per frame.</summary>
+    private static bool AutoDutyRepairConflict(Configuration cfg)
+    {
+        if (cfg.DutyRunner != 0 || !cfg.RepairEnabled || !IpcManager.AutoDutyAvailable)
+            return false;
+
+        var now = DateTime.UtcNow;
+        if (now - _adAutoRepairCheckAt > TimeSpan.FromSeconds(5))
+        {
+            _adAutoRepairEnabled = IpcManager.AutoDutyAutoRepairEnabled();
+            _adAutoRepairCheckAt = now;
+        }
+
+        return _adAutoRepairEnabled == true;
+    }
+
     private static void DrawPrereqChips(Configuration cfg)
     {
         if (cfg.DutyRunner == 0)
@@ -2234,5 +2580,12 @@ public sealed class MainWindow : Window, IDisposable
         }
         else
             UiTheme.Chip(FontAwesomeIcon.Check, "Lifestream", UiTheme.Green);
+
+        if (AutoDutyRepairConflict(cfg))
+        {
+            UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "AutoDuty Auto Repair is ON — conflicts with SealBreaker repair", UiTheme.Yellow);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Both plugins will try to repair, which interferes with SealBreaker's mender route.\nDisable it on the Config tab (Repair section) or in AutoDuty itself.");
+        }
     }
 }

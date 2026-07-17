@@ -8,18 +8,30 @@ namespace SealBreaker.Windows;
 /// <summary>Central palette and ImGui style helpers for the SealBreaker window.</summary>
 internal static class UiTheme
 {
-    // ── Palette ───────────────────────────────────────────────
+    // ── Palette — SealBreaker identity: gold seal, teal crack, deep navy (icon.png) ──
     public static readonly Vector4 Accent     = new(1.00f, 0.78f, 0.35f, 1f);
     public static readonly Vector4 AccentDim  = new(1.00f, 0.78f, 0.35f, 0.55f);
+    public static readonly Vector4 Teal       = new(0.08f, 0.87f, 0.84f, 1f);
+    public static readonly Vector4 TealWash   = new(0.08f, 0.87f, 0.84f, 0.08f);
     public static readonly Vector4 Green      = new(0.30f, 0.76f, 0.43f, 1f);
     public static readonly Vector4 GreenDark  = new(0.20f, 0.40f, 0.27f, 1f);
     public static readonly Vector4 Red        = new(0.89f, 0.32f, 0.32f, 1f);
     public static readonly Vector4 RedDark    = new(0.46f, 0.18f, 0.18f, 1f);
     public static readonly Vector4 Yellow     = new(0.90f, 0.74f, 0.35f, 1f);
-    public static readonly Vector4 Gray       = new(0.56f, 0.56f, 0.60f, 1f);
-    public static readonly Vector4 TextBright = new(0.86f, 0.86f, 0.88f, 1f);
-    public static readonly Vector4 CardBg     = new(0.135f, 0.135f, 0.165f, 1f);
-    public static readonly Vector4 CardBorder = new(0.24f, 0.24f, 0.28f, 1f);
+    public static readonly Vector4 Gray       = new(0.56f, 0.58f, 0.66f, 1f);
+    public static readonly Vector4 TextBright = new(0.90f, 0.89f, 0.86f, 1f);
+
+    public static readonly Vector4 WindowBg   = new(0.063f, 0.082f, 0.169f, 1f); // #10152B
+    public static readonly Vector4 NavBg      = new(0.071f, 0.094f, 0.204f, 1f); // #121834
+    public static readonly Vector4 ContentBg  = new(0.075f, 0.102f, 0.200f, 1f); // #131A33
+    public static readonly Vector4 PanelBg    = new(0.094f, 0.122f, 0.227f, 1f); // #181F3A
+    public static readonly Vector4 FrameBgCol = new(0.106f, 0.137f, 0.259f, 1f); // #1B2342
+    public static readonly Vector4 NavyBorder = new(0.165f, 0.200f, 0.322f, 1f); // #2A3352
+    public static readonly Vector4 NavHeader  = new(0.365f, 0.396f, 0.502f, 1f); // #5D6580
+    public static readonly Vector4 NavText    = new(0.663f, 0.651f, 0.596f, 1f); // #A9A698
+
+    public static readonly Vector4 CardBg     = new(0.094f, 0.122f, 0.227f, 1f); // panel navy
+    public static readonly Vector4 CardBorder = new(0.165f, 0.200f, 0.322f, 1f);
     public static readonly Vector4 ErrorBg    = new(0.30f, 0.12f, 0.12f, 1f);
 
     // ── Window style scope ────────────────────────────────────
@@ -48,6 +60,24 @@ internal static class UiTheme
         ImGui.PushStyleColor(ImGuiCol.CheckMark, Accent); colors++;
         ImGui.PushStyleColor(ImGuiCol.SliderGrab, AccentDim); colors++;
         ImGui.PushStyleColor(ImGuiCol.SliderGrabActive, Accent); colors++;
+
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, WindowBg); colors++;
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, PanelBg); colors++;
+        ImGui.PushStyleColor(ImGuiCol.Border, NavyBorder); colors++;
+        ImGui.PushStyleColor(ImGuiCol.TitleBg, NavBg); colors++;
+        ImGui.PushStyleColor(ImGuiCol.TitleBgActive, PanelBg); colors++;
+        ImGui.PushStyleColor(ImGuiCol.FrameBg, FrameBgCol); colors++;
+        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, Scale(FrameBgCol, 1.35f)); colors++;
+        ImGui.PushStyleColor(ImGuiCol.FrameBgActive, Scale(FrameBgCol, 1.6f)); colors++;
+        ImGui.PushStyleColor(ImGuiCol.Header, FrameBgCol); colors++;
+        ImGui.PushStyleColor(ImGuiCol.HeaderHovered, Scale(FrameBgCol, 1.35f)); colors++;
+        ImGui.PushStyleColor(ImGuiCol.HeaderActive, Scale(FrameBgCol, 1.6f)); colors++;
+        ImGui.PushStyleColor(ImGuiCol.Button, FrameBgCol); colors++;
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Scale(FrameBgCol, 1.35f)); colors++;
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, Scale(FrameBgCol, 1.6f)); colors++;
+        ImGui.PushStyleColor(ImGuiCol.Tab, NavBg); colors++;
+        ImGui.PushStyleColor(ImGuiCol.TabHovered, Scale(FrameBgCol, 1.35f)); colors++;
+        ImGui.PushStyleColor(ImGuiCol.TabActive, FrameBgCol); colors++;
 
         return new StyleScope(colors, vars);
     }
@@ -102,6 +132,19 @@ internal static class UiTheme
     }
 
     // ── Text helpers ──────────────────────────────────────────
+
+    /// <summary>Thin horizontal rule fading from gold into the navy border color.</summary>
+    public static void GoldFadeRule()
+    {
+        var pos = ImGui.GetCursorScreenPos();
+        var width = ImGui.GetContentRegionAvail().X;
+        var gold = ImGui.ColorConvertFloat4ToU32(new Vector4(Accent.X, Accent.Y, Accent.Z, 0.9f));
+        var fade = ImGui.ColorConvertFloat4ToU32(NavyBorder);
+        ImGui.GetWindowDrawList().AddRectFilledMultiColor(
+            pos, new Vector2(pos.X + width, pos.Y + 1f), gold, fade, fade, gold);
+        ImGui.Dummy(new Vector2(0, 4));
+    }
+
     public static void SectionTitle(string text)
     {
         ImGui.TextColored(Accent, text);
