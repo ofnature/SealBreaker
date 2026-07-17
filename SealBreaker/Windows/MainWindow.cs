@@ -266,11 +266,67 @@ public sealed class MainWindow : Window, IDisposable
     {
         UiTheme.SectionTitle("Farm settings");
 
-        var runs = cfg.RunsPerCycle;
-        if (ImGui.SliderInt("Runs per cycle", ref runs, 1, 50))
-        { cfg.RunsPerCycle = runs; cfg.Save(); }
+        var unlocked = cfg.AllowMultiRunPerCycle;
+        if (ImGui.Checkbox("Unlock multiple runs per cycle", ref unlocked))
+        {
+            if (unlocked)
+            {
+                ImGui.OpenPopup("Unlock multiple runs?");
+            }
+            else
+            {
+                cfg.AllowMultiRunPerCycle = false;
+                cfg.RunsPerCycle = 1;
+                cfg.Save();
+            }
+        }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("How many duty runs before heading to the Grand Company.");
+            ImGui.SetTooltip("The safe default is 1 run per cycle: run → deliver → buy → repair/extract → run again.\nMultiple runs per cycle is riskier and requires accepting a warning.");
+
+        if (ImGui.BeginPopupModal("Unlock multiple runs?"))
+        {
+            ImGui.PushTextWrapPos(360);
+            ImGui.TextColored(ColYellow, "More than one run per cycle can cause issues:");
+            ImGui.BulletText("Inventory can fill mid-cycle — drops are lost");
+            ImGui.BulletText("Gear repair only happens at cycle boundaries");
+            ImGui.BulletText("Longer cycles give stuck states more room to snowball");
+            ImGui.Spacing();
+            ImGui.TextWrapped("Only change this if you accept the risks.");
+            ImGui.PopTextWrapPos();
+            ImGui.Spacing();
+
+            if (UiTheme.SolidButton("Accept the risks", UiTheme.RedDark, new Vector2(150, 26)))
+            {
+                cfg.AllowMultiRunPerCycle = true;
+                cfg.Save();
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Keep 1 run per cycle", new Vector2(160, 26)))
+                ImGui.CloseCurrentPopup();
+
+            ImGui.EndPopup();
+        }
+
+        if (cfg.AllowMultiRunPerCycle)
+        {
+            var runs = cfg.RunsPerCycle;
+            if (ImGui.SliderInt("Runs per cycle", ref runs, 1, 50))
+            { cfg.RunsPerCycle = runs; cfg.Save(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("How many duty runs before heading to the Grand Company.");
+        }
+        else
+        {
+            ImGui.TextColored(UiTheme.Gray, "1 run per cycle (locked) — run, deliver, buy, repair/extract, repeat.");
+        }
+
+        var runLimit = cfg.TotalRunLimit;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputInt("Stop after N total runs", ref runLimit, 0, 0))
+        { cfg.TotalRunLimit = Math.Max(0, runLimit); cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("0 = run endlessly. Otherwise the farm finishes that run's GC turn-in/buying, then stops gracefully.");
 
         if (ImGui.CollapsingHeader("Item filter"))
             DrawFilterPanel(cfg);
@@ -1632,7 +1688,8 @@ public sealed class MainWindow : Window, IDisposable
             }
 
             Cell("Seals earned", $"{ctrl.TotalSeals:N0}", UiTheme.Accent);
-            Cell("Runs", $"{ctrl.TotalRuns}");
+            var runLimit = Plugin.Config.TotalRunLimit;
+            Cell("Runs", runLimit > 0 ? $"{ctrl.TotalRuns} / {runLimit}" : $"{ctrl.TotalRuns}");
             Cell("Cycles", $"{ctrl.TotalCycles}");
             Cell("Duck bones", $"{duckBonesTotal:N0}");
             Cell("Bought", $"{ctrl.TotalDuckbones:N0}");

@@ -379,6 +379,12 @@ public sealed class FarmController : IDisposable
         ResetMateriaExtractionState();
         ResetDutySupportQueueState();
         Plugin.Config.ApplyAutomaticGrandCompanySettings();
+        if (!Plugin.Config.AllowMultiRunPerCycle && Plugin.Config.RunsPerCycle != 1)
+        {
+            Plugin.Config.RunsPerCycle = 1;
+            Plugin.Config.Save();
+            Log("Runs per cycle reset to 1 — multi-run is not unlocked (Farm tab).");
+        }
         GotoState(FarmState.CheckSealSpend);
         Log($"SealBreaker v{PluginVersion} started — current seals: {GetCurrentSeals():N0}");
     }
@@ -699,6 +705,13 @@ public sealed class FarmController : IDisposable
                     break;
                 }
 
+                if (cfg.TotalRunLimit > 0 && TotalRuns >= cfg.TotalRunLimit)
+                {
+                    Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — stopping.");
+                    Stop();
+                    break;
+                }
+
                 if (IsMidDutyCycle(cfg))
                 {
                     _currentTask = ContinueDutyAsync();
@@ -752,7 +765,9 @@ public sealed class FarmController : IDisposable
                 {
                     RefreshAdsCombatAutomationIfNeeded();
 
-                    if (dutyStopped && (_runsThisCycle + 1 >= cfg.RunsPerCycle || StopAfterRunRequested))
+                    if (dutyStopped && (_runsThisCycle + 1 >= cfg.RunsPerCycle
+                                        || StopAfterRunRequested
+                                        || (cfg.TotalRunLimit > 0 && TotalRuns + 1 >= cfg.TotalRunLimit)))
                     {
                         if (!_adsLeaveRequestedForFinalRun)
                         {
@@ -786,7 +801,11 @@ public sealed class FarmController : IDisposable
                         break;
                     }
 
-                    if (_runsThisCycle >= cfg.RunsPerCycle)
+                    var runLimitReached = cfg.TotalRunLimit > 0 && TotalRuns >= cfg.TotalRunLimit;
+                    if (runLimitReached && _runsThisCycle < cfg.RunsPerCycle)
+                        Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — GC turn-in next, then stopping");
+
+                    if (_runsThisCycle >= cfg.RunsPerCycle || runLimitReached)
                     {
                         _deliveryListEmpty = false;
                         _dutyExitReadyAt   = null;

@@ -96,10 +96,17 @@ public class Configuration : IPluginConfiguration
     public const int AdsRepairModeNpcNoInn = 2;
     public const int AdsRepairModeNpcNoTeleportNoInn = 3;
 
-    public int Version { get; set; } = 19;
+    public int Version { get; set; } = 20;
 
     // ── Duty ──────────────────────────────────────────────────
-    public int RunsPerCycle { get; set; } = 5;
+    /// <summary>Locked to 1 unless AllowMultiRunPerCycle is accepted — multi-run cycles are the risky path.</summary>
+    public int RunsPerCycle { get; set; } = 1;
+
+    /// <summary>User explicitly accepted the multi-run risk warning; gates the RunsPerCycle slider.</summary>
+    public bool AllowMultiRunPerCycle { get; set; }
+
+    /// <summary>Stop the farm (after GC turn-in) once this many total runs complete this session. 0 = endless.</summary>
+    public int TotalRunLimit { get; set; }
 
     /// <summary>0 = AutoDuty, 1 = ADS (AI Duty Solver)</summary>
     public int DutyRunner { get; set; } = 0;
@@ -255,7 +262,7 @@ public class Configuration : IPluginConfiguration
         EnsureGcShopBuyLists();
         EnsureDesynthDefaults();
 
-        if (Version >= 19)
+        if (Version >= 20)
             return;
 
         if (Version < 4)
@@ -348,7 +355,11 @@ public class Configuration : IPluginConfiguration
         if (Version < 15)
             MigrateGlobalRepairSettings();
 
-        Version = 19;
+        // v20: multi-run cycles are now gated behind an explicit risk acknowledgment.
+        if (Version < 20 && RunsPerCycle > 1 && !AllowMultiRunPerCycle)
+            RunsPerCycle = 1;
+
+        Version = 20;
         Save();
     }
 
