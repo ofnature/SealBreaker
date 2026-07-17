@@ -1539,6 +1539,13 @@ public sealed class MainWindow : Window, IDisposable
                 ImGui.PopStyleColor();
             }
 
+            if (ctrl.StopAfterRunRequested)
+            {
+                UiTheme.Icon(FontAwesomeIcon.FlagCheckered, UiTheme.Yellow);
+                ImGui.SameLine(0, 6);
+                ImGui.TextColored(UiTheme.Yellow, "Stopping after the current run finishes");
+            }
+
             ImGui.TextColored(UiTheme.Gray, ctrl.StatusMessage);
         }
 
@@ -1983,7 +1990,27 @@ public sealed class MainWindow : Window, IDisposable
         var buttonSize = new Vector2(ImGui.GetContentRegionAvail().X, 34);
         if (ctrl.IsRunning)
         {
-            if (UiTheme.StopButton("Stop farm##farm", buttonSize)) ctrl.Stop();
+            if (ctrl.IsAnyTestMode)
+            {
+                if (UiTheme.StopButton("Stop##farm", buttonSize)) ctrl.Stop();
+            }
+            else
+            {
+                var halfWidth = (buttonSize.X - ImGui.GetStyle().ItemSpacing.X) / 2f;
+                if (UiTheme.StopButton("Stop farm##farm", new Vector2(halfWidth, 34))) ctrl.Stop();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Stops immediately — mid-dungeon this interrupts AutoDuty/ADS.");
+
+                ImGui.SameLine();
+                var armed = ctrl.StopAfterRunRequested;
+                var finishLabel = armed ? "Cancel stop after run##farm" : "Stop after this run##farm";
+                if (UiTheme.SolidButton(finishLabel, armed ? UiTheme.YellowDark : UiTheme.CardBorder, new Vector2(halfWidth, 34)))
+                    ctrl.ToggleStopAfterRun();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(armed
+                        ? "Armed — the farm stops once the current dungeon run finishes. Click to keep looping instead."
+                        : "Graceful stop: lets the current dungeon run finish cleanly, then stops before the next one.");
+            }
         }
         else
         {

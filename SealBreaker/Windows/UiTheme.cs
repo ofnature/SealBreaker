@@ -168,6 +168,8 @@ internal static class UiTheme
         return clicked;
     }
 
+    public static readonly Vector4 YellowDark = new(0.42f, 0.34f, 0.12f, 1f);
+
     public static bool StartButton(string label, Vector2 size) => SolidButton(label, GreenDark, size);
     public static bool StopButton(string label, Vector2 size) => SolidButton(label, RedDark, size);
 

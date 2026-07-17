@@ -187,6 +187,8 @@ public sealed class FarmController : IDisposable
 
     public FarmState State         { get; private set; } = FarmState.Idle;
     public bool      IsRunning     { get; private set; }
+    /// <summary>Graceful stop: finish the current dungeon run (AutoDuty/ADS untouched mid-run), then stop before the next one.</summary>
+    public bool      StopAfterRunRequested { get; private set; }
     public bool      IsRepairTest   => _repairTestMode;
     public bool      IsDeliveryTest => _deliveryTestMode;
     public bool      IsShopTest     => _shopTestMode;
@@ -360,6 +362,7 @@ public sealed class FarmController : IDisposable
 
         IsRunning = true; TotalCycles = 0; TotalRuns = 0; TotalSeals = 0;
         TotalDuckbones = 0; StartTime = DateTime.Now; _runsThisCycle = 0; _cycleCounted = false; LastError = null;
+        StopAfterRunRequested = false;
         _currentRunStart = default;
         _runClearTimes.Clear();
         _gcInitialSpend = true; _deliveryListEmpty = false; _deliveryBlockedByCap = false;
@@ -585,9 +588,23 @@ public sealed class FarmController : IDisposable
         GotoState(FarmState.OpenMateriaExtraction);
     }
 
+    /// <summary>Arm/disarm a graceful stop. Never interrupts the duty runner mid-dungeon —
+    /// the run completes normally and the farm stops before launching the next one.</summary>
+    public void ToggleStopAfterRun()
+    {
+        if (!IsRunning || IsAnyTestMode)
+            return;
+
+        StopAfterRunRequested = !StopAfterRunRequested;
+        Log(StopAfterRunRequested
+            ? "Stop requested — the current dungeon run will finish, then the farm stops"
+            : "Stop-after-run cancelled — the farm keeps looping");
+    }
+
     public void Stop()
     {
         IsRunning = false;
+        StopAfterRunRequested = false;
         _repairTestMode = false;
         _deliveryTestMode = false;
         _shopTestMode = false;
@@ -675,6 +692,13 @@ public sealed class FarmController : IDisposable
 
             case FarmState.StartDuty:
             {
+                if (StopAfterRunRequested)
+                {
+                    Log("Stop-after-run: stopping before the next duty.");
+                    Stop();
+                    break;
+                }
+
                 if (IsMidDutyCycle(cfg))
                 {
                     _currentTask = ContinueDutyAsync();
@@ -728,7 +752,7 @@ public sealed class FarmController : IDisposable
                 {
                     RefreshAdsCombatAutomationIfNeeded();
 
-                    if (dutyStopped && _runsThisCycle + 1 >= cfg.RunsPerCycle)
+                    if (dutyStopped && (_runsThisCycle + 1 >= cfg.RunsPerCycle || StopAfterRunRequested))
                     {
                         if (!_adsLeaveRequestedForFinalRun)
                         {
@@ -754,6 +778,14 @@ public sealed class FarmController : IDisposable
 
                     _runsThisCycle++; TotalRuns++;
                     Status($"Run {_runsThisCycle}/{cfg.RunsPerCycle} complete (total {TotalRuns})");
+
+                    if (StopAfterRunRequested)
+                    {
+                        Log($"Run complete — stopping as requested (total runs this session: {TotalRuns}).");
+                        Stop();
+                        break;
+                    }
+
                     if (_runsThisCycle >= cfg.RunsPerCycle)
                     {
                         _deliveryListEmpty = false;

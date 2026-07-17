@@ -82,6 +82,22 @@ public sealed class MiniWindow : Window
         if (ctrl.IsRunning)
         {
             if (UiTheme.StopButton("Stop##mini", buttonSize)) ctrl.Stop();
+
+            if (!ctrl.IsAnyTestMode)
+            {
+                ImGui.SameLine(0, 4);
+                var armed = ctrl.StopAfterRunRequested;
+                if (armed)
+                    ImGui.PushStyleColor(ImGuiCol.Button, UiTheme.YellowDark);
+                if (ImGuiComponents.IconButton(FontAwesomeIcon.FlagCheckered))
+                    ctrl.ToggleStopAfterRun();
+                if (armed)
+                    ImGui.PopStyleColor();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(armed
+                        ? "Stopping after the current run — click to cancel"
+                        : "Stop after this run (lets the dungeon finish cleanly)");
+            }
         }
         else
         {
