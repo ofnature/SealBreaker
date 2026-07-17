@@ -8,3 +8,6 @@ obj/
 # Cursor IDE files
 .cursor/
 .cursorrules
+# Only README.md is tracked; all other markdown stays local
+*.md
+!README.md
