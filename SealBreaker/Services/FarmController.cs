@@ -4258,6 +4258,8 @@ public sealed class FarmController : IDisposable
         _buyAttemptSince = null;
         _buyQtyDialogSent = false;
         _buyFindItemFailures = 0;
+        var buyGcIdx = Plugin.Config.GrandCompanyIndex;
+        await LogAsync($"Using the {GrandCompanyState.GrandCompanyName(buyGcIdx)} buy list — {Plugin.Config.EnabledGcShopBuyList().Count} enabled entries");
         await StatusAsync("GC exchange open — buying GC shop list...");
         _buyListIndex = 0;
         await GotoStateAsync(FarmState.BuyDuckbones);

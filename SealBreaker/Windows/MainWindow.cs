@@ -154,7 +154,13 @@ public sealed class MainWindow : Window, IDisposable
                 {
                     foreach (var gcIdx in GcTownTopLevelTabOrder)
                     {
-                        if (ImGui.BeginTabItem(GcTownTabNames[gcIdx]))
+                        var isActive = gcIdx == cfg.GrandCompanyIndex;
+                        var label = $"{GcTownTabNames[gcIdx]}{(isActive ? " (active)" : "")}###gcTownTab{gcIdx}";
+                        var flags = isActive && _gcTownSyncedGc != cfg.GrandCompanyIndex
+                            ? ImGuiTabItemFlags.SetSelected
+                            : ImGuiTabItemFlags.None;
+
+                        if (ImGui.BeginTabItem(label, flags))
                         {
                             DrawGcTownTab(cfg, gcIdx);
                             ImGui.EndTabItem();
@@ -162,6 +168,7 @@ public sealed class MainWindow : Window, IDisposable
                     }
 
                     ImGui.EndTabBar();
+                    _gcTownSyncedGc = cfg.GrandCompanyIndex;
                 }
 
                 ImGui.EndTabItem();
@@ -276,22 +283,43 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TextColored(ColGray, $"GC town routes: GC Towns tab → {GcTownTabNames[cfg.GrandCompanyIndex]} (active GC).");
     }
 
+    private static int _buyListSyncedGc = -1;
+    private static int _gcTownSyncedGc = -1;
+    private static bool _catalogShowAboveRank;
+
     private void DrawBuyListTab(Configuration cfg)
     {
         UiTheme.SectionTitle("GC shop buy list");
         ImGui.TextWrapped("Priority order: buy each item until Keep is reached, then move to the next entry.");
         ImGui.TextDisabled("Keep 0 = spend seals on that item until reserve, then try the next entry.");
         ImGui.TextDisabled($"Seal reserve (Config tab): {cfg.SealReserve:N0} — buying stops when seals reach this amount.");
-        ImGui.TextDisabled($"Farm uses the {GcTownTabNames[cfg.GrandCompanyIndex]} buy list selected by Grand Company.");
+
+        var activeGc = cfg.GrandCompanyIndex;
+        ImGui.TextColored(UiTheme.Green, $"Farm buys from the {GcTownTabNames[activeGc]} list ({GrandCompanyState.GrandCompanyName(activeGc)}).");
 
         ImGui.Spacing();
         if (ImGui.BeginTabBar("##gcShopBuyListTabs"))
         {
             for (var i = 0; i < GcTownTabNames.Length; i++)
             {
-                if (ImGui.BeginTabItem(GcTownTabNames[i]))
+                var isActive = i == activeGc;
+                var label = $"{GcTownTabNames[i]}{(isActive ? " (active)" : "")}###buylistTab{i}";
+                var flags = isActive && _buyListSyncedGc != activeGc
+                    ? ImGuiTabItemFlags.SetSelected
+                    : ImGuiTabItemFlags.None;
+
+                if (ImGui.BeginTabItem(label, flags))
                 {
                     ImGui.PushID($"buylist-{i}");
+                    if (!isActive)
+                    {
+                        UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Yellow);
+                        ImGui.SameLine(0, 6);
+                        ImGui.TextColored(UiTheme.Yellow,
+                            $"Not used — your Grand Company is {GrandCompanyState.GrandCompanyName(activeGc)}. The farm only buys from the {GcTownTabNames[activeGc]} list.");
+                        ImGui.Spacing();
+                    }
+
                     var buyList = cfg.GcShopBuyListFor(i);
                     DrawGcShopCatalogPicker(cfg, i, buyList);
                     ImGui.Spacing();
@@ -303,6 +331,8 @@ public sealed class MainWindow : Window, IDisposable
 
             ImGui.EndTabBar();
         }
+
+        _buyListSyncedGc = activeGc;
     }
 
     private void DrawGcShopCatalogPicker(Configuration cfg, int gcIdx, List<GcShopBuyEntry> buyList)
@@ -342,6 +372,23 @@ public sealed class MainWindow : Window, IDisposable
         int? tabFilter = _catalogCategoryFilter == 0 ? null : _catalogCategoryFilter - 1;
         var filtered = GcShopCatalog.GetForGrandCompany(gcIdx, tabFilter, _catalogSearch).ToList();
 
+        // Rank gating only makes sense for the GC the character belongs to.
+        var rankKnown = GrandCompanyState.TryGetDetected(out var detectedGc, out var playerRank, out _)
+                        && detectedGc == gcIdx;
+        if (rankKnown)
+        {
+            var hidden = filtered.Count(e => e.RequiredGrandCompanyRank > playerRank);
+            if (hidden > 0)
+            {
+                ImGui.Checkbox($"Show {hidden} item(s) above my rank ({GrandCompanyState.RankName(playerRank)})", ref _catalogShowAboveRank);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Items above your current GC rank cannot be bought and are skipped by the farm.\nShow them anyway to plan ahead for a promotion.");
+            }
+
+            if (!_catalogShowAboveRank)
+                filtered = filtered.Where(e => e.RequiredGrandCompanyRank <= playerRank).ToList();
+        }
+
         if (filtered.Count == 0)
         {
             ImGui.TextColored(ColYellow, "No catalog items match — reload from game data while logged in.");
@@ -349,7 +396,11 @@ public sealed class MainWindow : Window, IDisposable
         }
 
         _catalogAddIndex = Math.Clamp(_catalogAddIndex, 0, filtered.Count - 1);
-        var labels = filtered.Select(FormatCatalogLabel).ToArray();
+        var labels = filtered
+            .Select(e => rankKnown && e.RequiredGrandCompanyRank > playerRank
+                ? $"{FormatCatalogLabel(e)} — requires {GrandCompanyState.RankName(e.RequiredGrandCompanyRank)}"
+                : FormatCatalogLabel(e))
+            .ToArray();
         ImGui.SetNextItemWidth(320);
         ImGui.Combo("Add from catalog", ref _catalogAddIndex, labels, labels.Length);
 
@@ -1639,6 +1690,15 @@ public sealed class MainWindow : Window, IDisposable
         var moveFrom = -1;
         var moveTo = -1;
 
+        var rankKnown = GrandCompanyState.TryGetDetected(out var detectedGc, out var playerRank, out _)
+                        && detectedGc == gcIdx;
+        var rankByItemId = rankKnown
+            ? GcShopCatalog.GetForGrandCompany(gcIdx)
+                .Where(e => e.ItemId != 0)
+                .GroupBy(e => e.ItemId)
+                .ToDictionary(g => g.Key, g => g.Min(e => e.RequiredGrandCompanyRank))
+            : null;
+
         ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(8, 5));
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(5, 3));
 
@@ -1681,6 +1741,17 @@ public sealed class MainWindow : Window, IDisposable
                     ImGui.SetTooltip("Enable/disable this entry.");
 
                 ImGui.TableNextColumn();
+                if (rankByItemId != null
+                    && entry.ItemId != 0
+                    && rankByItemId.TryGetValue(entry.ItemId, out var requiredRank)
+                    && requiredRank > playerRank)
+                {
+                    UiTheme.Icon(FontAwesomeIcon.Lock, UiTheme.Yellow);
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip($"Requires {GrandCompanyState.RankName(requiredRank)} — the farm skips this entry until you rank up.");
+                    ImGui.SameLine(0, 5);
+                }
+
                 var label = string.IsNullOrWhiteSpace(entry.ItemName) ? "(unnamed)" : entry.ItemName;
                 ImGui.TextColored(entry.Enabled ? UiTheme.Accent : UiTheme.Gray, label);
                 ImGui.SameLine(0, 6);
