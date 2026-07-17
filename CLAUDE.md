@@ -16,7 +16,7 @@ Dalamud plugin (C# / .NET 10, `AllowUnsafeBlocks`, FFXIVClientStructs) that auto
 
 ### GitHub release procedure
 
-**Release on every version bump.** Users only receive code through `releases/latest` — a version bump pushed to `main` without a release ships nothing. After committing and pushing a version bump, publish the GitHub release as part of the same task (skip only if the user explicitly says to hold it).
+**Test first — never cut a release until the user OKs it.** After code changes: build **both** Debug and Release so the user can test the dev plugin in game, then stop — no version bump, no push, no release. When the user approves ("ok", "ship it", "cut a release"), do the full ship in one pass: bump the version (all three files + `LastUpdate`), rebuild both configs, commit, push, publish the GitHub release, and sync the Daedalus manifest (step 4 below). A version bump pushed to `main` without a release ships nothing to users, so bump-and-ship always travel together — just only after approval.
 
 `pluginmaster.json` points at `releases/latest/download/SealBreaker.zip`, so publishing = making a new latest release:
 
