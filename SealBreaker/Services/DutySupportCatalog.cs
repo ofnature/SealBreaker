@@ -10,7 +10,9 @@ internal sealed record DutySupportDuty(
     uint TerritoryType,
     string Name,
     byte RequiredLevel,
-    uint RequiredItemLevel);
+    uint RequiredItemLevel,
+    uint Expansion,
+    string ExpansionName);
 
 internal static class DutySupportCatalog
 {
@@ -36,7 +38,8 @@ internal static class DutySupportCatalog
         _duties = BuildFromGameData();
         EnsureMistwakeFallback(_duties);
         _duties = _duties
-            .OrderBy(d => d.RequiredLevel)
+            .OrderBy(d => d.Expansion)
+            .ThenBy(d => d.RequiredLevel)
             .ThenBy(d => d.RequiredItemLevel)
             .ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -115,12 +118,16 @@ internal static class DutySupportCatalog
                 if (dawnParticipable.GetSubrowCount(dawnContent.RowId) <= 1)
                     continue;
 
+                var exVersion = territory.Value.ExVersion;
+                var expansionName = exVersion.ValueNullable?.Name.ExtractText();
                 result.Add(new DutySupportDuty(
                     condition.RowId,
                     territory.Value.RowId,
                     CleanName(name),
                     condition.ClassJobLevelRequired,
-                    condition.ItemLevelRequired));
+                    condition.ItemLevelRequired,
+                    exVersion.RowId,
+                    string.IsNullOrWhiteSpace(expansionName) ? $"Expansion {exVersion.RowId}" : expansionName));
             }
         }
         catch (Exception ex)
@@ -141,7 +148,9 @@ internal static class DutySupportCatalog
             MistwakeTerritoryType,
             MistwakeName,
             100,
-            690));
+            690,
+            5,
+            "Dawntrail"));
     }
 
     private static string CleanName(string name)

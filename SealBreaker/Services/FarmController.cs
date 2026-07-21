@@ -4186,6 +4186,68 @@ public sealed class FarmController : IDisposable
         return (int)Math.Ceiling(minCondition / 300.0);
     }
 
+    /// <summary>Average equipped item level (game formula: 12 slots, a two-handed mainhand fills
+    /// both weapon slots and counts twice; belt and soul crystal excluded).</summary>
+    public static unsafe int GetAverageEquippedItemLevel()
+    {
+        try
+        {
+            var equipment = InventoryManager.Instance()->GetInventoryContainer(InventoryType.EquippedItems);
+            if (equipment == null)
+                return 0;
+
+            var itemSheet = Service.DataManager.GetExcelSheet<Item>();
+            if (itemSheet == null)
+                return 0;
+
+            // Two-handed mainhands have a non-zero (blocking) OffHand column in EquipSlotCategory.
+            // Trust the sheet alone: the game forbids equipping an offhand with a two-hander, so
+            // whatever the offhand slot claims to contain is skipped rather than trusted.
+            var twoHanded = false;
+            var mainhand = equipment->GetInventorySlot(0);
+            if (mainhand != null && mainhand->ItemId != 0)
+            {
+                var mainRow = itemSheet.GetRowOrDefault(mainhand->ItemId);
+                if (mainRow != null)
+                    twoHanded = (mainRow.Value.EquipSlotCategory.ValueNullable?.OffHand ?? 0) != 0;
+            }
+
+            var total = 0;
+            for (var slot = 0; slot < 13 && slot < equipment->Size; slot++)
+            {
+                if (slot == 5) // belt — removed from the game, always empty
+                    continue;
+                if (slot == 1 && twoHanded) // offhand blocked by a two-hander
+                    continue;
+
+                var item = equipment->GetInventorySlot(slot);
+                if (item == null || item->ItemId == 0)
+                    continue;
+
+                var row = itemSheet.GetRowOrDefault(item->ItemId);
+                if (row == null)
+                    continue;
+
+                var ilvl = (int)row.Value.LevelItem.RowId;
+                total += ilvl;
+
+                if (slot == 0 && twoHanded)
+                    total += ilvl;
+            }
+
+            // 12 slots: main, off, head, body, hands, legs, feet, ears, neck, wrists, ring, ring.
+            // A two-hander fills both weapon slots (counted twice above). Verified against the
+            // character window: total 9420 / 12 = 785 exact.
+            var result = total / 12;
+            Service.PluginLog.Debug($"[SealBreaker] Avg ilvl calc: total={total} twoHanded={twoHanded} result={result}");
+            return result;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     private static unsafe bool TryClickRepairAll()
     {
         var addon = Service.GameGui.GetAddonByName<AddonRepair>("Repair");

@@ -39,6 +39,7 @@ public sealed class MainWindow : Window, IDisposable
         "Immortal Flames (zone 130)",
     ];
 
+    private readonly ExportImportUi _transferUi = new();
     private string _newItemIdInput = string.Empty;
     private int _catalogCategoryFilter = 4;
     private string _catalogSearch = string.Empty;
@@ -123,6 +124,8 @@ public sealed class MainWindow : Window, IDisposable
         DrawCurrentSection(cfg, ctrl);
         ImGui.EndChild();
         ImGui.PopStyleColor();
+
+        _transferUi.Draw(cfg);
     }
 
     // ── Sidebar shell ─────────────────────────────────────────
@@ -143,7 +146,7 @@ public sealed class MainWindow : Window, IDisposable
     private static readonly Dictionary<SbSection, (string Title, string Sub, string Keywords)> SectionMeta = new()
     {
         [SbSection.Dashboard]    = ("Dashboard", "status, metrics, start and tests", "dashboard status metrics seals runs cycles start stop tests delivery shop repair extract kingcake"),
-        [SbSection.Duty]         = ("Duty", "which dungeon the farm runs", "duty runner autoduty ads dungeon mistwake mode support trust squadron regular free trial path"),
+        [SbSection.Duty]         = ("Duty", "which dungeon the farm runs", "duty runner autoduty ads dungeon mistwake mode support trust squadron regular free trial path expansion dawntrail endwalker shadowbringers stormblood heavensward realm reborn ilvl item level"),
         [SbSection.FarmSettings] = ("Farm settings", "cycle and session limits", "runs per cycle multi run unlock risk total run limit stop after echo chat"),
         [SbSection.ItemFilter]   = ("Item filter", "what gets turned in", "item filter blacklist whitelist protected ids list mode deliver turn in"),
         [SbSection.BuyList]      = ("Buy list", "what seals are spent on", "buy list duck bones kingcake aetheryte ticket catalog keep quantity seal cost rank shop"),
@@ -672,6 +675,18 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TextColored(UiTheme.Green, $"Farm buys from the {GcTownTabNames[activeGc]} list ({GrandCompanyState.GrandCompanyName(activeGc)}).");
 
         ImGui.Spacing();
+        if (ImGui.Button("Export to clipboard"))
+            _transferUi.BeginExport(cfg);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip($"Share your {GcTownTabNames[activeGc]} buy list as a one-line preset.\nGC-specific items transfer as the recipient's own GC equivalents.");
+
+        ImGui.SameLine();
+        if (ImGui.Button("Import from clipboard"))
+            _transferUi.BeginImport(cfg);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Paste a SealBreaker export (SB_EXPORT:...) — you review everything before it touches your list.");
+
+        ImGui.Spacing();
         if (ImGui.BeginTabBar("##gcShopBuyListTabs"))
         {
             for (var i = 0; i < GcTownTabNames.Length; i++)
@@ -731,6 +746,29 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.BeginPopup("CatalogExported"))
         {
             ImGui.TextWrapped($"Saved to:\n{GcShopCatalog.CatalogFilePath}");
+            ImGui.EndPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Mapping table"))
+        {
+            try
+            {
+                var mappingPath = Path.Combine(Service.PluginInterface.ConfigDirectory.FullName, "gc_mapping_table.md");
+                File.WriteAllText(mappingPath, BuyListTransfer.BuildMappingTableMarkdown(GcShopCatalog.Entries));
+                ImGui.OpenPopup("MappingExported");
+            }
+            catch (Exception ex)
+            {
+                Service.PluginLog.Error(ex, "[SealBreaker] Mapping table export failed");
+            }
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Debug: dump the derived GC counterpart mapping (universal / mapped / exclusive) to a markdown file for review.");
+
+        if (ImGui.BeginPopup("MappingExported"))
+        {
+            ImGui.TextWrapped($"Saved to:\n{Path.Combine(Service.PluginInterface.ConfigDirectory.FullName, "gc_mapping_table.md")}");
             ImGui.EndPopup();
         }
 
@@ -1369,6 +1407,74 @@ public sealed class MainWindow : Window, IDisposable
     private static bool _autoDutyPathCheckResult = true;
     private static DateTime _autoDutyPathCheckAt = DateTime.MinValue;
 
+    private static int _adExpansionFilter = int.MinValue;
+    private static DateTime _ilvlCheckAt = DateTime.MinValue;
+    private static int _cachedIlvl;
+
+    /// <summary>Current average ilvl line + red warning when the duty outgears the character. Cached 2s.</summary>
+    private static void DrawItemLevelCheck(uint requiredIlvl)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _ilvlCheckAt > TimeSpan.FromSeconds(2))
+        {
+            _cachedIlvl = FarmController.GetAverageEquippedItemLevel();
+            _ilvlCheckAt = now;
+        }
+
+        if (_cachedIlvl <= 0)
+            return;
+
+        var meets = requiredIlvl == 0 || _cachedIlvl >= requiredIlvl;
+        ImGui.TextDisabled($"Your average item level: {_cachedIlvl}");
+        if (!meets)
+        {
+            UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Red);
+            ImGui.SameLine(0, 6);
+            ImGui.TextColored(UiTheme.Red,
+                $"Below this duty's requirement (ilvl {requiredIlvl}) — the game will refuse to queue.");
+        }
+    }
+
+    /// <summary>Expansion filter combo + filtered duty list. Returns the filtered duties (never empty when source isn't).</summary>
+    private static List<T> DrawExpansionFilter<T>(
+        string id, List<T> duties, uint selectedExpansion,
+        Func<T, uint> expansionOf, Func<T, string> expansionNameOf, ref int filter)
+    {
+        var expansions = duties
+            .Select(d => (Id: expansionOf(d), Name: expansionNameOf(d)))
+            .Distinct()
+            .OrderBy(x => x.Id)
+            .ToList();
+
+        // First draw: follow the currently selected duty's expansion.
+        if (filter == int.MinValue)
+            filter = (int)selectedExpansion;
+
+        var filterValue = filter;
+        if (filterValue >= 0 && expansions.All(x => x.Id != (uint)filterValue))
+        {
+            filter = -1;
+            filterValue = -1;
+        }
+
+        var comboIndex = filterValue < 0 ? 0 : expansions.FindIndex(x => x.Id == (uint)filterValue) + 1;
+        var labels = new string[expansions.Count + 1];
+        labels[0] = "All expansions";
+        for (var i = 0; i < expansions.Count; i++)
+            labels[i + 1] = expansions[i].Name;
+
+        ImGui.SetNextItemWidth(320);
+        if (ImGui.Combo($"Expansion##{id}", ref comboIndex, labels, labels.Length))
+            filter = comboIndex == 0 ? -1 : (int)expansions[comboIndex - 1].Id;
+
+        if (filter < 0)
+            return duties;
+
+        var local = filter;
+        var filtered = duties.Where(d => expansionOf(d) == (uint)local).ToList();
+        return filtered.Count > 0 ? filtered : duties;
+    }
+
     private static void DrawAutoDutyDutySection(Configuration cfg)
     {
         AutoDutyCatalog.EnsureInitialized();
@@ -1379,14 +1485,22 @@ public sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        var selectedIndex = AutoDutyCatalog.IndexOfSelected(cfg);
-        var labels = duties.Select(AutoDutyCatalog.FormatLabel).ToArray();
+        var selected = AutoDutyCatalog.SelectedOrDefault(cfg);
+        var filtered = DrawExpansionFilter(
+            "ad", duties, selected.Expansion,
+            d => d.Expansion, d => d.ExpansionName, ref _adExpansionFilter);
+
+        var selectedIndex = filtered.FindIndex(d =>
+            d.ContentFinderConditionId == selected.ContentFinderConditionId
+            && d.TerritoryType == selected.TerritoryType);
+        var labels = filtered.Select(AutoDutyCatalog.FormatLabel).ToArray();
         ImGui.SetNextItemWidth(320);
-        if (ImGui.Combo("Dungeon", ref selectedIndex, labels, labels.Length))
-            AutoDutyCatalog.ApplySelection(cfg, duties[Math.Clamp(selectedIndex, 0, duties.Count - 1)]);
+        if (ImGui.Combo("Dungeon", ref selectedIndex, labels, labels.Length) && selectedIndex >= 0)
+            AutoDutyCatalog.ApplySelection(cfg, filtered[Math.Clamp(selectedIndex, 0, filtered.Count - 1)]);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("AutoDuty runs this dungeon each cycle. AutoDuty must have a path for it.");
 
+        ImGui.Spacing();
         var mode = Math.Clamp(cfg.AutoDutyDutyMode, 0, AutoDutyModeItems.Length - 1);
         ImGui.SetNextItemWidth(320);
         if (ImGui.Combo("Duty mode", ref mode, AutoDutyModeItems, AutoDutyModeItems.Length))
@@ -1399,8 +1513,9 @@ public sealed class MainWindow : Window, IDisposable
                 + "Duty Support / Trust run with NPCs — no other players needed, works on free trial (FTP) accounts.\n"
                 + "'Use AutoDuty's setting' leaves whatever mode is configured in AutoDuty itself.");
 
-        var selected = AutoDutyCatalog.SelectedOrDefault(cfg);
-        ImGui.TextDisabled($"Selected: {selected.Name} (territory {selected.TerritoryType})");
+        selected = AutoDutyCatalog.SelectedOrDefault(cfg);
+        ImGui.TextDisabled($"Selected: {selected.Name} — {selected.ExpansionName} (territory {selected.TerritoryType})");
+        DrawItemLevelCheck(selected.RequiredItemLevel);
 
         if (cfg.AutoDutyDutyMode is Configuration.AutoDutyModeSupport or Configuration.AutoDutyModeTrust
             && !selected.HasDutySupport)
@@ -1423,6 +1538,8 @@ public sealed class MainWindow : Window, IDisposable
         }
     }
 
+    private static int _adsExpansionFilter = int.MinValue;
+
     private static void DrawAdsDutySupportSection(Configuration cfg)
     {
         DutySupportCatalog.EnsureInitialized();
@@ -1433,17 +1550,24 @@ public sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        var selectedIndex = DutySupportCatalog.IndexOfSelected(cfg);
-        var labels = duties.Select(DutySupportCatalog.FormatLabel).ToArray();
+        var selected = DutySupportCatalog.SelectedOrDefault(cfg);
+        var filtered = DrawExpansionFilter(
+            "ads", duties, selected.Expansion,
+            d => d.Expansion, d => d.ExpansionName, ref _adsExpansionFilter);
+
+        var selectedIndex = filtered.FindIndex(d =>
+            d.ContentFinderConditionId == selected.ContentFinderConditionId
+            && d.TerritoryType == selected.TerritoryType);
+        var labels = filtered.Select(DutySupportCatalog.FormatLabel).ToArray();
         ImGui.SetNextItemWidth(320);
-        if (ImGui.Combo("Duty Support dungeon", ref selectedIndex, labels, labels.Length))
-            DutySupportCatalog.ApplySelection(cfg, duties[Math.Clamp(selectedIndex, 0, duties.Count - 1)]);
+        if (ImGui.Combo("Duty Support dungeon", ref selectedIndex, labels, labels.Length) && selectedIndex >= 0)
+            DutySupportCatalog.ApplySelection(cfg, filtered[Math.Clamp(selectedIndex, 0, filtered.Count - 1)]);
 
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("SealBreaker queues this Duty Support dungeon, then starts ADS once inside.");
 
-        var selected = DutySupportCatalog.SelectedOrDefault(cfg);
-        ImGui.TextDisabled($"Selected: {selected.Name} (territory {selected.TerritoryType}, content finder {selected.ContentFinderConditionId})");
+        ImGui.TextDisabled($"Selected: {selected.Name} — {selected.ExpansionName} (territory {selected.TerritoryType}, content finder {selected.ContentFinderConditionId})");
+        DrawItemLevelCheck(selected.RequiredItemLevel);
         if (selected.ContentFinderConditionId == 0)
             ImGui.TextColored(ColYellow, "Content Finder ID was not detected from game data; reload in game before queueing.");
     }

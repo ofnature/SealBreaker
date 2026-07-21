@@ -11,7 +11,9 @@ internal sealed record AutoDutyDuty(
     string Name,
     byte RequiredLevel,
     uint RequiredItemLevel,
-    bool HasDutySupport);
+    bool HasDutySupport,
+    uint Expansion,
+    string ExpansionName);
 
 /// <summary>Dungeon catalog for the AutoDuty runner — all dungeons, not just Duty Support ones.</summary>
 internal static class AutoDutyCatalog
@@ -35,7 +37,8 @@ internal static class AutoDutyCatalog
         _duties = BuildFromGameData();
         EnsureMistwakeFallback(_duties);
         _duties = _duties
-            .OrderBy(d => d.RequiredLevel)
+            .OrderBy(d => d.Expansion)
+            .ThenBy(d => d.RequiredLevel)
             .ThenBy(d => d.RequiredItemLevel)
             .ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -110,13 +113,17 @@ internal static class AutoDutyCatalog
                 if (territory == null)
                     continue;
 
+                var exVersion = territory.Value.ExVersion;
+                var expansionName = exVersion.ValueNullable?.Name.ExtractText();
                 result.Add(new AutoDutyDuty(
                     condition.RowId,
                     territory.Value.RowId,
                     CleanName(name),
                     condition.ClassJobLevelRequired,
                     condition.ItemLevelRequired,
-                    dutySupportIds.Contains(condition.RowId)));
+                    dutySupportIds.Contains(condition.RowId),
+                    exVersion.RowId,
+                    string.IsNullOrWhiteSpace(expansionName) ? $"Expansion {exVersion.RowId}" : expansionName));
             }
         }
         catch (Exception ex)
@@ -138,7 +145,9 @@ internal static class AutoDutyCatalog
             DutySupportCatalog.MistwakeName,
             100,
             690,
-            true));
+            true,
+            5,
+            "Dawntrail"));
     }
 
     private static string CleanName(string name)
