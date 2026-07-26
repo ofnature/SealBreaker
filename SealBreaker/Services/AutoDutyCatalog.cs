@@ -13,7 +13,8 @@ internal sealed record AutoDutyDuty(
     uint RequiredItemLevel,
     bool HasDutySupport,
     uint Expansion,
-    string ExpansionName);
+    string ExpansionName,
+    uint InstanceContentId);
 
 /// <summary>Dungeon catalog for the AutoDuty runner — all dungeons, not just Duty Support ones.</summary>
 internal static class AutoDutyCatalog
@@ -124,7 +125,8 @@ internal static class AutoDutyCatalog
                     condition.ItemLevelRequired,
                     dutySupportIds.Contains(condition.RowId),
                     exVersion.RowId,
-                    string.IsNullOrWhiteSpace(expansionName) ? $"Expansion {exVersion.RowId}" : expansionName));
+                    string.IsNullOrWhiteSpace(expansionName) ? $"Expansion {exVersion.RowId}" : expansionName,
+                    condition.ContentLinkType == 1 ? condition.Content.RowId : 0));
             }
         }
         catch (Exception ex)
@@ -148,7 +150,8 @@ internal static class AutoDutyCatalog
             690,
             true,
             5,
-            "Dawntrail"));
+            "Dawntrail",
+            0));
     }
 
     private static string CleanName(string name)

@@ -12,7 +12,8 @@ internal sealed record DutySupportDuty(
     byte RequiredLevel,
     uint RequiredItemLevel,
     uint Expansion,
-    string ExpansionName);
+    string ExpansionName,
+    uint InstanceContentId);
 
 internal static class DutySupportCatalog
 {
@@ -128,7 +129,8 @@ internal static class DutySupportCatalog
                     condition.ClassJobLevelRequired,
                     condition.ItemLevelRequired,
                     exVersion.RowId,
-                    string.IsNullOrWhiteSpace(expansionName) ? $"Expansion {exVersion.RowId}" : expansionName));
+                    string.IsNullOrWhiteSpace(expansionName) ? $"Expansion {exVersion.RowId}" : expansionName,
+                    condition.ContentLinkType == 1 ? condition.Content.RowId : 0));
             }
         }
         catch (Exception ex)
@@ -151,7 +153,8 @@ internal static class DutySupportCatalog
             100,
             690,
             5,
-            "Dawntrail"));
+            "Dawntrail",
+            0));
     }
 
     private static string CleanName(string name)

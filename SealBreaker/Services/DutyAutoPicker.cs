@@ -22,6 +22,7 @@ internal static class DutyAutoPicker
             .Where(d => d.RequiredLevel > 0 && d.RequiredLevel <= level)
             .Where(d => d.RequiredItemLevel == 0 || ilvl <= 0 || d.RequiredItemLevel <= (uint)ilvl)
             .Where(d => !wantsNpcParty || d.HasDutySupport)
+            .Where(d => FarmController.IsDutyUnlocked(d.InstanceContentId))
             .OrderByDescending(d => d.RequiredLevel)
             .ThenByDescending(d => d.RequiredItemLevel)
             .ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
@@ -46,6 +47,7 @@ internal static class DutyAutoPicker
             .Where(d => d.ContentFinderConditionId != 0)
             .Where(d => d.RequiredLevel > 0 && d.RequiredLevel <= level)
             .Where(d => d.RequiredItemLevel == 0 || ilvl <= 0 || d.RequiredItemLevel <= (uint)ilvl)
+            .Where(d => FarmController.IsDutyUnlocked(d.InstanceContentId))
             .OrderByDescending(d => d.RequiredLevel)
             .ThenByDescending(d => d.RequiredItemLevel)
             .ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase)

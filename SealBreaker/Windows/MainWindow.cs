@@ -616,7 +616,11 @@ public sealed class MainWindow : Window, IDisposable
                 ImGui.SetTooltip("Run one gear-equip pass right now (farm must be stopped). Results go to the Log tab.");
 
             if (IpcManager.CharonGearAvailable)
+            {
                 UiTheme.Chip(FontAwesomeIcon.Check, "via Charon", UiTheme.Teal);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Charon's gear equipper IPC is connected.\nNote: while Charon's execution toggle is off (preview mode), passes are declined and\nSealBreaker automatically uses the game's Equip Recommended — check Charon's preview\nlist in-game, then enable execution in Charon's settings.");
+            }
             else
             {
                 UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Charon not detected — using the game's Equip Recommended", UiTheme.Yellow);
@@ -1463,8 +1467,8 @@ public sealed class MainWindow : Window, IDisposable
         _cachedLevel = Service.ObjectTable.LocalPlayer?.Level ?? 0;
     }
 
-    /// <summary>Level + ilvl line with red warnings when the selected duty is out of reach. Cached 2s.</summary>
-    private static void DrawDutyRequirementCheck(byte requiredLevel, uint requiredIlvl)
+    /// <summary>Level + ilvl + unlock line with red warnings when the selected duty is out of reach. Cached 2s.</summary>
+    private static void DrawDutyRequirementCheck(byte requiredLevel, uint requiredIlvl, uint instanceContentId = 0)
     {
         RefreshPlayerGearCache();
         if (_cachedLevel <= 0)
@@ -1472,7 +1476,14 @@ public sealed class MainWindow : Window, IDisposable
 
         ImGui.TextDisabled($"Your level: {_cachedLevel} · average item level: {_cachedIlvl}");
 
-        if (requiredLevel > _cachedLevel)
+        if (!FarmController.IsDutyUnlocked(instanceContentId))
+        {
+            UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Red);
+            ImGui.SameLine(0, 6);
+            ImGui.TextColored(UiTheme.Red,
+                "This duty is not unlocked on this character — complete its unlock quest first.");
+        }
+        else if (requiredLevel > _cachedLevel)
         {
             UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Red);
             ImGui.SameLine(0, 6);
@@ -1525,8 +1536,8 @@ public sealed class MainWindow : Window, IDisposable
         return requiredIlvl == 0 || _cachedIlvl <= 0 || requiredIlvl <= (uint)_cachedIlvl;
     }
 
-    /// <summary>Dungeon combo with ineligible (level/ilvl-gated) entries grayed out and unselectable.</summary>
-    private static int DrawDungeonCombo(string label, string[] labels, int selectedIndex, Func<int, (byte Level, uint Ilvl)> requirementsOf)
+    /// <summary>Dungeon combo with ineligible (level/ilvl/unlock-gated) entries grayed out and unselectable.</summary>
+    private static int DrawDungeonCombo(string label, string[] labels, int selectedIndex, Func<int, (byte Level, uint Ilvl, uint InstanceContentId)> requirementsOf)
     {
         RefreshPlayerGearCache();
         var picked = -1;
@@ -1538,8 +1549,8 @@ public sealed class MainWindow : Window, IDisposable
 
         for (var i = 0; i < labels.Length; i++)
         {
-            var (reqLevel, reqIlvl) = requirementsOf(i);
-            if (!IsDutyEligible(reqLevel, reqIlvl))
+            var (reqLevel, reqIlvl, instanceContentId) = requirementsOf(i);
+            if (!IsDutyEligible(reqLevel, reqIlvl) || !FarmController.IsDutyUnlocked(instanceContentId))
             {
                 ImGui.PushStyleColor(ImGuiCol.Text, UiTheme.NavHeader);
                 ImGui.Selectable(labels[i], false, ImGuiSelectableFlags.Disabled);
@@ -1673,7 +1684,7 @@ public sealed class MainWindow : Window, IDisposable
             && d.TerritoryType == selected.TerritoryType);
         var labels = filtered.Select(AutoDutyCatalog.FormatLabel).ToArray();
         var picked = DrawDungeonCombo("Dungeon", labels, selectedIndex,
-            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel));
+            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId));
         if (picked >= 0)
             AutoDutyCatalog.ApplySelection(cfg, filtered[picked]);
         if (ImGui.IsItemHovered())
@@ -1707,7 +1718,7 @@ public sealed class MainWindow : Window, IDisposable
 
         selected = AutoDutyCatalog.SelectedOrDefault(cfg);
         ImGui.TextDisabled($"Selected: {selected.Name} — {selected.ExpansionName} (territory {selected.TerritoryType})");
-        DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel);
+        DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel, selected.InstanceContentId);
 
         if (cfg.AutoDutyDutyMode is Configuration.AutoDutyModeSupport or Configuration.AutoDutyModeTrust
             && !selected.HasDutySupport)
@@ -1752,7 +1763,7 @@ public sealed class MainWindow : Window, IDisposable
             && d.TerritoryType == selected.TerritoryType);
         var labels = filtered.Select(DutySupportCatalog.FormatLabel).ToArray();
         var picked = DrawDungeonCombo("Duty Support dungeon", labels, selectedIndex,
-            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel));
+            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId));
         if (picked >= 0)
             DutySupportCatalog.ApplySelection(cfg, filtered[picked]);
 
@@ -1773,7 +1784,7 @@ public sealed class MainWindow : Window, IDisposable
         }
 
         ImGui.TextDisabled($"Selected: {selected.Name} — {selected.ExpansionName} (territory {selected.TerritoryType}, content finder {selected.ContentFinderConditionId})");
-        DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel);
+        DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel, selected.InstanceContentId);
         if (selected.ContentFinderConditionId == 0)
             ImGui.TextColored(ColYellow, "Content Finder ID was not detected from game data; reload in game before queueing.");
     }

@@ -3483,7 +3483,8 @@ public sealed class FarmController : IDisposable
                 return;
             }
 
-            Log("WARN: Charon.EquipUpgrades refused the request — falling back to Equip Recommended");
+            // Expected while Charon's execution toggle is off (preview mode) or a pass is already running.
+            Log("Charon declined the equip pass (preview mode or busy) — using the game's Equip Recommended instead");
         }
 
         await VanillaEquipRecommendedAsync(before);
@@ -3515,6 +3516,23 @@ public sealed class FarmController : IDisposable
                 return;
 
             await Task.Delay(150);
+        }
+    }
+
+    /// <summary>Whether the character has unlocked an instance content (same flag the Duty Finder
+    /// uses). 0 = unknown id (e.g. catalog fallback entries) — treat as unlocked, never block on it.</summary>
+    public static unsafe bool IsDutyUnlocked(uint instanceContentId)
+    {
+        if (instanceContentId == 0)
+            return true;
+
+        try
+        {
+            return UIState.IsInstanceContentUnlocked(instanceContentId);
+        }
+        catch
+        {
+            return true;
         }
     }
 
