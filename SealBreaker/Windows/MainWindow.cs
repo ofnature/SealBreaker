@@ -1536,8 +1536,8 @@ public sealed class MainWindow : Window, IDisposable
         return requiredIlvl == 0 || _cachedIlvl <= 0 || requiredIlvl <= (uint)_cachedIlvl;
     }
 
-    /// <summary>Dungeon combo with ineligible (level/ilvl/unlock-gated) entries grayed out and unselectable.</summary>
-    private static int DrawDungeonCombo(string label, string[] labels, int selectedIndex, Func<int, (byte Level, uint Ilvl, uint InstanceContentId)> requirementsOf)
+    /// <summary>Dungeon combo with ineligible (level/ilvl/unlock/NPC-party-gated) entries grayed out and unselectable.</summary>
+    private static int DrawDungeonCombo(string label, string[] labels, int selectedIndex, Func<int, (byte Level, uint Ilvl, uint InstanceContentId, bool NpcPartyOk)> requirementsOf)
     {
         RefreshPlayerGearCache();
         var picked = -1;
@@ -1549,8 +1549,8 @@ public sealed class MainWindow : Window, IDisposable
 
         for (var i = 0; i < labels.Length; i++)
         {
-            var (reqLevel, reqIlvl, instanceContentId) = requirementsOf(i);
-            if (!IsDutyEligible(reqLevel, reqIlvl) || !FarmController.IsDutyUnlocked(instanceContentId))
+            var (reqLevel, reqIlvl, instanceContentId, npcPartyOk) = requirementsOf(i);
+            if (!IsDutyEligible(reqLevel, reqIlvl) || !FarmController.IsDutyUnlocked(instanceContentId) || !npcPartyOk)
             {
                 ImGui.PushStyleColor(ImGuiCol.Text, UiTheme.NavHeader);
                 ImGui.Selectable(labels[i], false, ImGuiSelectableFlags.Disabled);
@@ -1683,8 +1683,11 @@ public sealed class MainWindow : Window, IDisposable
             d.ContentFinderConditionId == selected.ContentFinderConditionId
             && d.TerritoryType == selected.TerritoryType);
         var labels = filtered.Select(AutoDutyCatalog.FormatLabel).ToArray();
+        var needsNpcParty = cfg.AutoDutyDutyMode
+            is not (Configuration.AutoDutyModeRegular or Configuration.AutoDutyModeSquadron);
         var picked = DrawDungeonCombo("Dungeon", labels, selectedIndex,
-            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId));
+            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId,
+                  !needsNpcParty || filtered[i].HasDutySupport));
         if (picked >= 0)
             AutoDutyCatalog.ApplySelection(cfg, filtered[picked]);
         if (ImGui.IsItemHovered())
@@ -1720,10 +1723,10 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TextDisabled($"Selected: {selected.Name} — {selected.ExpansionName} (territory {selected.TerritoryType})");
         DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel, selected.InstanceContentId);
 
-        if (cfg.AutoDutyDutyMode is Configuration.AutoDutyModeSupport or Configuration.AutoDutyModeTrust
+        if (cfg.AutoDutyDutyMode is not (Configuration.AutoDutyModeRegular or Configuration.AutoDutyModeSquadron)
             && !selected.HasDutySupport)
         {
-            ImGui.TextColored(ColYellow, "This dungeon may not offer Duty Support/Trust — AutoDuty could fail to queue.");
+            ImGui.TextColored(ColYellow, "No Duty Support/Trust for this dungeon (hard modes never have them) — only a Regular or Squadron party can run it.");
         }
 
         if (IpcManager.AutoDutyAvailable)
@@ -1763,7 +1766,7 @@ public sealed class MainWindow : Window, IDisposable
             && d.TerritoryType == selected.TerritoryType);
         var labels = filtered.Select(DutySupportCatalog.FormatLabel).ToArray();
         var picked = DrawDungeonCombo("Duty Support dungeon", labels, selectedIndex,
-            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId));
+            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId, true));
         if (picked >= 0)
             DutySupportCatalog.ApplySelection(cfg, filtered[picked]);
 

@@ -16,7 +16,12 @@ internal static class DutyAutoPicker
             return null;
 
         AutoDutyCatalog.EnsureInitialized();
-        var wantsNpcParty = cfg.AutoDutyDutyMode is Configuration.AutoDutyModeSupport or Configuration.AutoDutyModeTrust;
+
+        // Hard modes (and other party-only dungeons) have no Duty Support/Trust. Unless the user
+        // explicitly picked Regular or Squadron, assume an NPC party — "Use AutoDuty's setting"
+        // almost always means Support/Trust on this fleet, so never pick a dungeon NPCs can't run.
+        var wantsNpcParty = cfg.AutoDutyDutyMode
+            is not (Configuration.AutoDutyModeRegular or Configuration.AutoDutyModeSquadron);
 
         var ordered = AutoDutyCatalog.Duties
             .Where(d => d.RequiredLevel > 0 && d.RequiredLevel <= level)
