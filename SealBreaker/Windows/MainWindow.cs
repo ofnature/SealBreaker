@@ -146,8 +146,8 @@ public sealed class MainWindow : Window, IDisposable
     private static readonly Dictionary<SbSection, (string Title, string Sub, string Keywords)> SectionMeta = new()
     {
         [SbSection.Dashboard]    = ("Dashboard", "status, metrics, start and tests", "dashboard status metrics seals runs cycles start stop tests delivery shop repair extract kingcake"),
-        [SbSection.Duty]         = ("Duty", "which dungeon the farm runs", "duty runner autoduty ads dungeon mistwake mode support trust squadron regular free trial path expansion dawntrail endwalker shadowbringers stormblood heavensward realm reborn ilvl item level"),
-        [SbSection.FarmSettings] = ("Farm settings", "cycle and session limits", "runs per cycle multi run unlock risk total run limit stop after echo chat"),
+        [SbSection.Duty]         = ("Duty", "which dungeon the farm runs", "duty runner autoduty ads dungeon mistwake mode support trust squadron regular free trial path expansion dawntrail endwalker shadowbringers stormblood heavensward realm reborn ilvl item level auto pick best"),
+        [SbSection.FarmSettings] = ("Farm settings", "cycle and session limits", "runs per cycle multi run unlock risk total run limit stop after echo chat leveling mode auto pick equip gear upgrades charon"),
         [SbSection.ItemFilter]   = ("Item filter", "what gets turned in", "item filter blacklist whitelist protected ids list mode deliver turn in"),
         [SbSection.BuyList]      = ("Buy list", "what seals are spent on", "buy list duck bones kingcake aetheryte ticket catalog keep quantity seal cost rank shop"),
         [SbSection.Repair]       = ("Repair", "gear repair between cycles", "repair mender threshold condition ads self npc autoduty auto repair durability"),
@@ -591,6 +591,43 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawFarmSettingsSection(Configuration cfg)
     {
+        var leveling = cfg.LevelingMode;
+        if (ImGui.Checkbox("Leveling mode", ref leveling))
+        { cfg.LevelingMode = leveling; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Each cycle runs the normal loop (deliver → buy → repair → extract), then re-picks the best\n"
+                + "dungeon for your current level and gear before launching the next run — the duty upgrades\n"
+                + "itself as you level. Groundwork for the upcoming auto gear equipper.");
+        if (cfg.LevelingMode)
+        {
+            ImGui.TextColored(UiTheme.Teal, "The dungeon on the Duty page re-picks automatically before every run.");
+
+            ImGui.Indent();
+            var autoEquip = cfg.AutoEquipUpgrades;
+            if (ImGui.Checkbox("Auto-equip gear upgrades", ref autoEquip))
+            { cfg.AutoEquipUpgrades = autoEquip; cfg.Save(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Before Expert Delivery each cycle, equip any gear upgrades from your bags/armoury —\nso fresh drops get worn instead of turned in for seals.\nUses Charon's gear equipper when installed; otherwise the game's Equip Recommended (weaker picks).");
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Equip now"))
+                Plugin.Controller.TriggerGearEquipOnce();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Run one gear-equip pass right now (farm must be stopped). Results go to the Log tab.");
+
+            if (IpcManager.CharonGearAvailable)
+                UiTheme.Chip(FontAwesomeIcon.Check, "via Charon", UiTheme.Teal);
+            else
+            {
+                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Charon not detected — using the game's Equip Recommended", UiTheme.Yellow);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Install Charon for smarter gear selection (ilvl + job stat weighting).\nThe game's Equip Recommended works but makes weaker choices.");
+            }
+
+            ImGui.Unindent();
+        }
+
+        ImGui.Spacing();
         var unlocked = cfg.AllowMultiRunPerCycle;
         if (ImGui.Checkbox("Unlock multiple runs per cycle", ref unlocked))
         {
@@ -1410,29 +1447,154 @@ public sealed class MainWindow : Window, IDisposable
     private static int _adExpansionFilter = int.MinValue;
     private static DateTime _ilvlCheckAt = DateTime.MinValue;
     private static int _cachedIlvl;
+    private static int _cachedLevel;
+    private static Dictionary<uint, bool>? _adPathCache;
+    private static DateTime _adPathCacheAt = DateTime.MinValue;
+    private static string _autoPickNote = string.Empty;
 
-    /// <summary>Current average ilvl line + red warning when the duty outgears the character. Cached 2s.</summary>
-    private static void DrawItemLevelCheck(uint requiredIlvl)
+    private static void RefreshPlayerGearCache()
     {
         var now = DateTime.UtcNow;
-        if (now - _ilvlCheckAt > TimeSpan.FromSeconds(2))
-        {
-            _cachedIlvl = FarmController.GetAverageEquippedItemLevel();
-            _ilvlCheckAt = now;
-        }
-
-        if (_cachedIlvl <= 0)
+        if (now - _ilvlCheckAt < TimeSpan.FromSeconds(2))
             return;
 
-        var meets = requiredIlvl == 0 || _cachedIlvl >= requiredIlvl;
-        ImGui.TextDisabled($"Your average item level: {_cachedIlvl}");
-        if (!meets)
+        _ilvlCheckAt = now;
+        _cachedIlvl = FarmController.GetAverageEquippedItemLevel();
+        _cachedLevel = Service.ObjectTable.LocalPlayer?.Level ?? 0;
+    }
+
+    /// <summary>Level + ilvl line with red warnings when the selected duty is out of reach. Cached 2s.</summary>
+    private static void DrawDutyRequirementCheck(byte requiredLevel, uint requiredIlvl)
+    {
+        RefreshPlayerGearCache();
+        if (_cachedLevel <= 0)
+            return;
+
+        ImGui.TextDisabled($"Your level: {_cachedLevel} · average item level: {_cachedIlvl}");
+
+        if (requiredLevel > _cachedLevel)
+        {
+            UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Red);
+            ImGui.SameLine(0, 6);
+            ImGui.TextColored(UiTheme.Red,
+                $"Requires level {requiredLevel} — the game will refuse to queue.");
+        }
+        else if (requiredIlvl > 0 && _cachedIlvl > 0 && requiredIlvl > (uint)_cachedIlvl)
         {
             UiTheme.Icon(FontAwesomeIcon.ExclamationTriangle, UiTheme.Red);
             ImGui.SameLine(0, 6);
             ImGui.TextColored(UiTheme.Red,
                 $"Below this duty's requirement (ilvl {requiredIlvl}) — the game will refuse to queue.");
         }
+    }
+
+    /// <summary>Per-territory AutoDuty path availability, built once per 5 minutes while the IPC is up.</summary>
+    private static void EnsureAdPathCache(List<AutoDutyDuty> duties)
+    {
+        if (!IpcManager.AutoDutyAvailable)
+        {
+            _adPathCache = null;
+            return;
+        }
+
+        if (_adPathCache != null && DateTime.UtcNow - _adPathCacheAt < TimeSpan.FromMinutes(5))
+            return;
+
+        var cache = new Dictionary<uint, bool>(duties.Count);
+        foreach (var duty in duties)
+        {
+            if (!cache.ContainsKey(duty.TerritoryType))
+                cache[duty.TerritoryType] = IpcManager.AutoDutyContentHasPath(duty.TerritoryType);
+        }
+
+        _adPathCache = cache;
+        _adPathCacheAt = DateTime.UtcNow;
+    }
+
+    private static bool AutoDutyHasPathCached(uint territoryType) =>
+        _adPathCache == null || _adPathCache.GetValueOrDefault(territoryType, true);
+
+    private static bool IsDutyEligible(byte requiredLevel, uint requiredIlvl)
+    {
+        if (_cachedLevel <= 0)
+            return true; // not logged in / unknown — don't gray anything out
+
+        if (requiredLevel > _cachedLevel)
+            return false;
+
+        return requiredIlvl == 0 || _cachedIlvl <= 0 || requiredIlvl <= (uint)_cachedIlvl;
+    }
+
+    /// <summary>Dungeon combo with ineligible (level/ilvl-gated) entries grayed out and unselectable.</summary>
+    private static int DrawDungeonCombo(string label, string[] labels, int selectedIndex, Func<int, (byte Level, uint Ilvl)> requirementsOf)
+    {
+        RefreshPlayerGearCache();
+        var picked = -1;
+        var preview = selectedIndex >= 0 && selectedIndex < labels.Length ? labels[selectedIndex] : string.Empty;
+
+        ImGui.SetNextItemWidth(320);
+        if (!ImGui.BeginCombo(label, preview))
+            return picked;
+
+        for (var i = 0; i < labels.Length; i++)
+        {
+            var (reqLevel, reqIlvl) = requirementsOf(i);
+            if (!IsDutyEligible(reqLevel, reqIlvl))
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, UiTheme.NavHeader);
+                ImGui.Selectable(labels[i], false, ImGuiSelectableFlags.Disabled);
+                ImGui.PopStyleColor();
+                continue;
+            }
+
+            if (ImGui.Selectable(labels[i], i == selectedIndex))
+                picked = i;
+            if (i == selectedIndex)
+                ImGui.SetItemDefaultFocus();
+        }
+
+        ImGui.EndCombo();
+        return picked;
+    }
+
+    private static void AutoPickBestAutoDutyDungeon(Configuration cfg, List<AutoDutyDuty> duties)
+    {
+        if (_cachedLevel <= 0)
+        {
+            _autoPickNote = "log in first";
+            return;
+        }
+
+        var best = DutyAutoPicker.PickBestAutoDuty(cfg, _cachedLevel, _cachedIlvl, AutoDutyHasPathCached);
+        if (best == null)
+        {
+            _autoPickNote = "no eligible dungeon found";
+            return;
+        }
+
+        AutoDutyCatalog.ApplySelection(cfg, best);
+        _adExpansionFilter = (int)best.Expansion;
+        _autoPickNote = $"picked {best.Name}";
+    }
+
+    private static void AutoPickBestAdsDungeon(Configuration cfg, List<DutySupportDuty> duties)
+    {
+        if (_cachedLevel <= 0)
+        {
+            _autoPickNote = "log in first";
+            return;
+        }
+
+        var best = DutyAutoPicker.PickBestAds(_cachedLevel, _cachedIlvl);
+        if (best == null)
+        {
+            _autoPickNote = "no eligible dungeon found";
+            return;
+        }
+
+        DutySupportCatalog.ApplySelection(cfg, best);
+        _adsExpansionFilter = (int)best.Expansion;
+        _autoPickNote = $"picked {best.Name}";
     }
 
     /// <summary>Expansion filter combo + filtered duty list. Returns the filtered duties (never empty when source isn't).</summary>
@@ -1485,20 +1647,50 @@ public sealed class MainWindow : Window, IDisposable
             return;
         }
 
+        if (cfg.LevelingMode)
+            ImGui.TextColored(UiTheme.Teal, "Leveling mode is on — the dungeon below re-picks automatically before each run.");
+
         var selected = AutoDutyCatalog.SelectedOrDefault(cfg);
+        EnsureAdPathCache(duties);
+
         var filtered = DrawExpansionFilter(
             "ad", duties, selected.Expansion,
             d => d.Expansion, d => d.ExpansionName, ref _adExpansionFilter);
+
+        // Hide dungeons AutoDuty has no path for — it cannot run them anyway.
+        if (_adPathCache != null)
+        {
+            var withPath = filtered.Where(d => AutoDutyHasPathCached(d.TerritoryType)).ToList();
+            var hidden = filtered.Count - withPath.Count;
+            if (withPath.Count > 0)
+                filtered = withPath;
+            if (hidden > 0)
+                ImGui.TextColored(UiTheme.Gray, $"{hidden} dungeon(s) hidden — AutoDuty has no path for them.");
+        }
 
         var selectedIndex = filtered.FindIndex(d =>
             d.ContentFinderConditionId == selected.ContentFinderConditionId
             && d.TerritoryType == selected.TerritoryType);
         var labels = filtered.Select(AutoDutyCatalog.FormatLabel).ToArray();
-        ImGui.SetNextItemWidth(320);
-        if (ImGui.Combo("Dungeon", ref selectedIndex, labels, labels.Length) && selectedIndex >= 0)
-            AutoDutyCatalog.ApplySelection(cfg, filtered[Math.Clamp(selectedIndex, 0, filtered.Count - 1)]);
+        var picked = DrawDungeonCombo("Dungeon", labels, selectedIndex,
+            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel));
+        if (picked >= 0)
+            AutoDutyCatalog.ApplySelection(cfg, filtered[picked]);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("AutoDuty runs this dungeon each cycle. AutoDuty must have a path for it.");
+            ImGui.SetTooltip("AutoDuty runs this dungeon each cycle. Dungeons without an AutoDuty path are hidden;\ngrayed entries are above your level or item level.");
+
+        if (ImGui.Button("Auto-pick best dungeon"))
+        {
+            RefreshPlayerGearCache();
+            AutoPickBestAutoDutyDungeon(cfg, duties);
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Selects the highest-level (then highest-ilvl) dungeon you can actually queue for:\nwithin your level and item level, with an AutoDuty path, and matching your duty mode.");
+        if (!string.IsNullOrEmpty(_autoPickNote))
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(UiTheme.Teal, _autoPickNote);
+        }
 
         ImGui.Spacing();
         var mode = Math.Clamp(cfg.AutoDutyDutyMode, 0, AutoDutyModeItems.Length - 1);
@@ -1515,7 +1707,7 @@ public sealed class MainWindow : Window, IDisposable
 
         selected = AutoDutyCatalog.SelectedOrDefault(cfg);
         ImGui.TextDisabled($"Selected: {selected.Name} — {selected.ExpansionName} (territory {selected.TerritoryType})");
-        DrawItemLevelCheck(selected.RequiredItemLevel);
+        DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel);
 
         if (cfg.AutoDutyDutyMode is Configuration.AutoDutyModeSupport or Configuration.AutoDutyModeTrust
             && !selected.HasDutySupport)
@@ -1559,15 +1751,29 @@ public sealed class MainWindow : Window, IDisposable
             d.ContentFinderConditionId == selected.ContentFinderConditionId
             && d.TerritoryType == selected.TerritoryType);
         var labels = filtered.Select(DutySupportCatalog.FormatLabel).ToArray();
-        ImGui.SetNextItemWidth(320);
-        if (ImGui.Combo("Duty Support dungeon", ref selectedIndex, labels, labels.Length) && selectedIndex >= 0)
-            DutySupportCatalog.ApplySelection(cfg, filtered[Math.Clamp(selectedIndex, 0, filtered.Count - 1)]);
+        var picked = DrawDungeonCombo("Duty Support dungeon", labels, selectedIndex,
+            i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel));
+        if (picked >= 0)
+            DutySupportCatalog.ApplySelection(cfg, filtered[picked]);
 
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("SealBreaker queues this Duty Support dungeon, then starts ADS once inside.");
+            ImGui.SetTooltip("SealBreaker queues this Duty Support dungeon, then starts ADS once inside.\nGrayed entries are above your level or item level.");
+
+        if (ImGui.Button("Auto-pick best dungeon##ads"))
+        {
+            RefreshPlayerGearCache();
+            AutoPickBestAdsDungeon(cfg, duties);
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Selects the highest-level (then highest-ilvl) Duty Support dungeon within your level and item level.");
+        if (!string.IsNullOrEmpty(_autoPickNote))
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(UiTheme.Teal, _autoPickNote);
+        }
 
         ImGui.TextDisabled($"Selected: {selected.Name} — {selected.ExpansionName} (territory {selected.TerritoryType}, content finder {selected.ContentFinderConditionId})");
-        DrawItemLevelCheck(selected.RequiredItemLevel);
+        DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel);
         if (selected.ContentFinderConditionId == 0)
             ImGui.TextColored(ColYellow, "Content Finder ID was not detected from game data; reload in game before queueing.");
     }

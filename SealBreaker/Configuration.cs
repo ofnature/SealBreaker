@@ -108,6 +108,14 @@ public class Configuration : IPluginConfiguration
     /// <summary>Stop the farm (after GC turn-in) once this many total runs complete this session. 0 = endless.</summary>
     public int TotalRunLimit { get; set; }
 
+    /// <summary>Leveling mode: re-pick the best eligible dungeon (level + ilvl + path) before every duty launch.
+    /// Groundwork for the auto gear equipper.</summary>
+    public bool LevelingMode { get; set; }
+
+    /// <summary>Leveling mode: equip gear upgrades before Expert Delivery each cycle
+    /// (Charon IPC when available, otherwise the game's Equip Recommended).</summary>
+    public bool AutoEquipUpgrades { get; set; } = true;
+
     /// <summary>0 = AutoDuty, 1 = ADS (AI Duty Solver)</summary>
     public int DutyRunner { get; set; } = 0;
 

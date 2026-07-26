@@ -255,6 +255,7 @@ public sealed class FarmController : IDisposable
     private const int BuyPhaseTimeoutMs = 180_000;
     private const int BuyFindItemMaxFailures = 8;
     private bool _cycleCounted;
+    private bool _gearEquipDoneThisCycle;
     private bool _openGcShopRetried;
     private bool _repairAllClicked;
     private bool _repairYesnoLogged;
@@ -856,6 +857,16 @@ public sealed class FarmController : IDisposable
                 if (DateTime.Now - _dutyExitReadyAt.Value >= TimeSpan.FromMilliseconds(PostDutySettleMs))
                 {
                     _dutyExitReadyAt = null;
+
+                    // Leveling mode: equip upgrades BEFORE Expert Delivery so fresh drops get
+                    // worn instead of turned in for seals.
+                    if (cfg.LevelingMode && cfg.AutoEquipUpgrades && !_gearEquipDoneThisCycle)
+                    {
+                        _gearEquipDoneThisCycle = true;
+                        _currentTask = RunGearEquipThenDeliveryAsync();
+                        break;
+                    }
+
                     BeginGcNavigation(FarmState.OpenExpertDelivery);
                 }
                 break;
@@ -3245,6 +3256,7 @@ public sealed class FarmController : IDisposable
             TotalCycles++;
             _runsThisCycle = 0;
             _cycleCounted = true;
+            _gearEquipDoneThisCycle = false;
         }
 
         await StatusAsync($"Cycle {TotalCycles}: starting run 1/{cfg.RunsPerCycle}");
@@ -3284,6 +3296,9 @@ public sealed class FarmController : IDisposable
 
     private async Task<bool> LaunchDutyRunnerAsync()
     {
+        if (Plugin.Config.LevelingMode)
+            await Service.Framework.RunOnFrameworkThread(() => ApplyLevelingModeDutyPick(Plugin.Config));
+
         var runner = Plugin.Config.DutyRunner;
         if (runner == 0 && !IpcManager.AutoDutyAvailable)
         {
@@ -3356,6 +3371,175 @@ public sealed class FarmController : IDisposable
             : $"Queueing Duty Support: {duty.Name} (ADS will start inside after zoning)");
         await GotoStateAsync(FarmState.OpenDutySupport);
         return false;
+    }
+
+    /// <summary>Leveling mode: as the character levels/gears up mid-farm, upgrade the duty
+    /// selection to the best eligible dungeon before each launch. Framework thread only.</summary>
+    private void ApplyLevelingModeDutyPick(Configuration cfg)
+    {
+        var level = Service.ObjectTable.LocalPlayer?.Level ?? 0;
+        if (level <= 0)
+            return;
+
+        var ilvl = GetAverageEquippedItemLevel();
+
+        if (cfg.DutyRunner == 0)
+        {
+            var best = DutyAutoPicker.PickBestAutoDuty(cfg, level, ilvl, IpcManager.AutoDutyContentHasPath);
+            if (best == null)
+            {
+                Log("WARN: Leveling mode found no eligible AutoDuty dungeon — keeping the current selection");
+                return;
+            }
+
+            if (best.TerritoryType == cfg.AutoDutyTerritoryType
+                && best.ContentFinderConditionId == cfg.AutoDutyContentFinderConditionId)
+                return;
+
+            AutoDutyCatalog.ApplySelection(cfg, best);
+            Log($"Leveling mode: duty upgraded to {best.Name} (Lv {best.RequiredLevel}{(best.RequiredItemLevel > 0 ? $", ilvl {best.RequiredItemLevel}" : "")}) at level {level}, ilvl {ilvl}");
+        }
+        else
+        {
+            var best = DutyAutoPicker.PickBestAds(level, ilvl);
+            if (best == null)
+            {
+                Log("WARN: Leveling mode found no eligible Duty Support dungeon — keeping the current selection");
+                return;
+            }
+
+            if (best.ContentFinderConditionId == cfg.AdsDutySupportContentFinderConditionId)
+                return;
+
+            DutySupportCatalog.ApplySelection(cfg, best);
+            Log($"Leveling mode: duty upgraded to {best.Name} (Lv {best.RequiredLevel}{(best.RequiredItemLevel > 0 ? $", ilvl {best.RequiredItemLevel}" : "")}) at level {level}, ilvl {ilvl}");
+        }
+    }
+
+    // ── Gear equip (leveling mode) ────────────────────────────
+
+    private Task? _gearEquipManualTask;
+
+    /// <summary>Manual "Equip now" — runs the same Charon/vanilla flow outside the farm loop.</summary>
+    public void TriggerGearEquipOnce()
+    {
+        if (IsRunning)
+        {
+            Log("Cannot run a gear equip test while the farm is running — stop it first");
+            return;
+        }
+
+        if (_gearEquipManualTask is { IsCompleted: false })
+            return;
+
+        _gearEquipManualTask = Task.Run(RunGearEquipCoreAsync);
+    }
+
+    private async Task RunGearEquipThenDeliveryAsync()
+    {
+        await StatusAsync("Equipping gear upgrades...");
+        try
+        {
+            await RunGearEquipCoreAsync();
+        }
+        catch (Exception ex)
+        {
+            Log($"WARN: Gear equip failed ({ex.Message}) — continuing to delivery");
+        }
+
+        if (!IsRunning)
+            return;
+
+        await Service.Framework.RunOnFrameworkThread(() => BeginGcNavigation(FarmState.OpenExpertDelivery));
+    }
+
+    /// <summary>Charon IPC when available, otherwise the game's Equip Recommended. Fail-open — never blocks the farm.</summary>
+    private async Task RunGearEquipCoreAsync()
+    {
+        var before = await Service.Framework.RunOnFrameworkThread(GetAverageEquippedItemLevel);
+
+        if (IpcManager.CharonGearAvailable)
+        {
+            var pending = IpcManager.CharonPendingUpgradeCount();
+            if (pending == 0)
+            {
+                Log("Gear equip: no upgrades pending (Charon)");
+                return;
+            }
+
+            if (IpcManager.CharonEquipUpgrades())
+            {
+                Log(pending > 0
+                    ? $"Gear equip via Charon — {pending} upgrade(s) pending..."
+                    : "Gear equip via Charon...");
+
+                var deadline = DateTime.UtcNow.AddSeconds(20);
+                await Task.Delay(500);
+                while (DateTime.UtcNow < deadline && IpcManager.CharonEquipUpgradesBusy())
+                    await Task.Delay(250);
+
+                var after = await Service.Framework.RunOnFrameworkThread(GetAverageEquippedItemLevel);
+                Log($"Gear equip complete (Charon) — ilvl {before} → {after}");
+                return;
+            }
+
+            Log("WARN: Charon.EquipUpgrades refused the request — falling back to Equip Recommended");
+        }
+
+        await VanillaEquipRecommendedAsync(before);
+    }
+
+    private async Task VanillaEquipRecommendedAsync(int before)
+    {
+        if (!await Service.Framework.RunOnFrameworkThread(RecommendEquipSetup))
+        {
+            Log("WARN: Equip Recommended unavailable — skipping gear equip");
+            return;
+        }
+
+        await WaitRecommendModuleIdleAsync();
+        await Service.Framework.RunOnFrameworkThread(RecommendEquipExecute);
+        await WaitRecommendModuleIdleAsync();
+        await Task.Delay(500);
+
+        var after = await Service.Framework.RunOnFrameworkThread(GetAverageEquippedItemLevel);
+        Log($"Gear equip complete (Equip Recommended) — ilvl {before} → {after}");
+    }
+
+    private static async Task WaitRecommendModuleIdleAsync()
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(4);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!await Service.Framework.RunOnFrameworkThread(RecommendEquipUpdating))
+                return;
+
+            await Task.Delay(150);
+        }
+    }
+
+    private static unsafe bool RecommendEquipSetup()
+    {
+        var module = FFXIVClientStructs.FFXIV.Client.UI.Misc.RecommendEquipModule.Instance();
+        var player = Service.ObjectTable.LocalPlayer;
+        if (module == null || player == null)
+            return false;
+
+        module->SetupForClassJob((byte)player.ClassJob.RowId);
+        return true;
+    }
+
+    private static unsafe void RecommendEquipExecute()
+    {
+        var module = FFXIVClientStructs.FFXIV.Client.UI.Misc.RecommendEquipModule.Instance();
+        if (module != null)
+            module->EquipRecommendedGear();
+    }
+
+    private static unsafe bool RecommendEquipUpdating()
+    {
+        var module = FFXIVClientStructs.FFXIV.Client.UI.Misc.RecommendEquipModule.Instance();
+        return module != null && module->IsUpdating;
     }
 
     private bool TryPrepareAutoDutyRun()

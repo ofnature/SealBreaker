@@ -82,8 +82,9 @@ internal static class DutySupportCatalog
     public static string FormatLabel(DutySupportDuty duty)
     {
         var level = duty.RequiredLevel > 0 ? $"Lv {duty.RequiredLevel}" : "Lv ?";
-        var ilvl = duty.RequiredItemLevel > 0 ? $"ilvl {duty.RequiredItemLevel}" : "ilvl ?";
-        return $"{duty.Name} ({level}, {ilvl})";
+        // RequiredItemLevel 0 means the duty has no ilvl gate (typical for ARR), not "unknown".
+        var ilvl = duty.RequiredItemLevel > 0 ? $", ilvl {duty.RequiredItemLevel}" : "";
+        return $"{duty.Name} ({level}{ilvl})";
     }
 
     private static List<DutySupportDuty> BuildFromGameData()

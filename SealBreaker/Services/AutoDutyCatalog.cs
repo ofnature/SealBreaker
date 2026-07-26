@@ -81,9 +81,10 @@ internal static class AutoDutyCatalog
     public static string FormatLabel(AutoDutyDuty duty)
     {
         var level = duty.RequiredLevel > 0 ? $"Lv {duty.RequiredLevel}" : "Lv ?";
-        var ilvl = duty.RequiredItemLevel > 0 ? $"ilvl {duty.RequiredItemLevel}" : "ilvl ?";
+        // RequiredItemLevel 0 means the duty has no ilvl gate (typical for ARR), not "unknown".
+        var ilvl = duty.RequiredItemLevel > 0 ? $", ilvl {duty.RequiredItemLevel}" : "";
         var support = duty.HasDutySupport ? ", Duty Support" : "";
-        return $"{duty.Name} ({level}, {ilvl}{support})";
+        return $"{duty.Name} ({level}{ilvl}{support})";
     }
 
     private static List<AutoDutyDuty> BuildFromGameData()

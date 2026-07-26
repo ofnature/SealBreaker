@@ -463,6 +463,90 @@ internal static class IpcManager
         }
     }
 
+    // ── Charon (gear equipper) ────────────────────────────────
+    // Contract (Charon implements these):
+    //   Charon.EquipUpgrades        Func<bool>  — start an equip pass; true = started
+    //   Charon.EquipUpgradesBusy    Func<bool>  — true while a pass is running
+    //   Charon.PendingUpgradeCount  Func<int>   — upgrades available without equipping
+    private const string CharonPluginInternalName = "Charon";
+
+    private static ICallGateSubscriber<bool>? _charonEquipUpgrades;
+    private static ICallGateSubscriber<bool>? _charonEquipBusy;
+    private static ICallGateSubscriber<int>?  _charonPendingUpgrades;
+
+    public static bool CharonPluginLoaded => IsPluginLoaded(CharonPluginInternalName);
+
+    public static bool CharonGearAvailable
+    {
+        get
+        {
+            if (!CharonPluginLoaded)
+                return false;
+
+            RefreshCharonSubscribers();
+            return _charonEquipUpgrades?.HasFunction ?? false;
+        }
+    }
+
+    private static void RefreshCharonSubscribers()
+    {
+        if (_charonEquipUpgrades is { HasFunction: false })
+            _charonEquipUpgrades = null;
+        if (_charonEquipBusy is { HasFunction: false })
+            _charonEquipBusy = null;
+        if (_charonPendingUpgrades is { HasFunction: false })
+            _charonPendingUpgrades = null;
+
+        try
+        {
+            _charonEquipUpgrades ??= Service.PluginInterface.GetIpcSubscriber<bool>("Charon.EquipUpgrades");
+            _charonEquipBusy ??= Service.PluginInterface.GetIpcSubscriber<bool>("Charon.EquipUpgradesBusy");
+            _charonPendingUpgrades ??= Service.PluginInterface.GetIpcSubscriber<int>("Charon.PendingUpgradeCount");
+        }
+        catch
+        {
+            // Availability is checked via HasFunction per call.
+        }
+    }
+
+    public static bool CharonEquipUpgrades()
+    {
+        RefreshCharonSubscribers();
+        if (_charonEquipUpgrades is not { HasFunction: true })
+            return false;
+
+        try { return _charonEquipUpgrades.InvokeFunc(); }
+        catch (IpcNotReadyError) { _charonEquipUpgrades = null; return false; }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "Charon.EquipUpgrades IPC failed");
+            return false;
+        }
+    }
+
+    public static bool CharonEquipUpgradesBusy()
+    {
+        RefreshCharonSubscribers();
+        if (_charonEquipBusy is not { HasFunction: true })
+            return false;
+
+        try { return _charonEquipBusy.InvokeFunc(); }
+        catch (IpcNotReadyError) { _charonEquipBusy = null; return false; }
+        catch { return false; }
+    }
+
+    /// <summary>-1 when unknown (IPC missing/failed).</summary>
+    public static int CharonPendingUpgradeCount()
+    {
+        RefreshCharonSubscribers();
+        if (_charonPendingUpgrades is not { HasFunction: true })
+            return -1;
+
+        try { return _charonPendingUpgrades.InvokeFunc(); }
+        catch (IpcNotReadyError) { _charonPendingUpgrades = null; return -1; }
+        catch { return -1; }
+    }
+
     // ── vnavmesh ──────────────────────────────────────────────
     private static ICallGateSubscriber<Vector3, bool, bool>? _vnavPathfind;
     private static ICallGateSubscriber<Vector3, bool, float, bool>? _vnavPathfindClose;
@@ -1020,6 +1104,9 @@ internal static class IpcManager
     public static void Reset()
     {
         ResetDutyRunners();
+        _charonEquipUpgrades = null;
+        _charonEquipBusy = null;
+        _charonPendingUpgrades = null;
         _vnavPathfind      = null;
         _vnavPathfindClose = null;
         _vnavIsReady       = null;
