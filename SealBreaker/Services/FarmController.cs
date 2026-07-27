@@ -3382,6 +3382,11 @@ public sealed class FarmController : IDisposable
             return;
 
         var ilvl = GetAverageEquippedItemLevel();
+        if (ilvl <= 0)
+        {
+            Log("WARN: Leveling mode could not read your gear (ilvl 0) — keeping the current duty this run");
+            return;
+        }
 
         if (cfg.DutyRunner == 0)
         {
@@ -3517,6 +3522,28 @@ public sealed class FarmController : IDisposable
 
             await Task.Delay(150);
         }
+    }
+
+    /// <summary>Scaling items (the EXP earrings/ring: LevelEquip 1 with a large sheet ilvl — exactly
+    /// five exist and all scale "according to current level") carry their MAX ilvl in the sheet.
+    /// Approximate the game's per-level value by capping at the rough max-equippable ilvl for the
+    /// character's level: exact at level 1 and at the item's cap, within ~10 mid-band.</summary>
+    private static int EffectiveItemLevel(int sheetIlvl, byte levelEquip, int charLevel)
+    {
+        if (levelEquip > 1 || sheetIlvl <= 30 || charLevel <= 0)
+            return sheetIlvl;
+
+        var levelCap = charLevel switch
+        {
+            < 50 => charLevel,
+            < 60 => 130 + (charLevel - 50) * 14,
+            < 70 => 270 + (charLevel - 60) * 13,
+            < 80 => 400 + (charLevel - 70) * 13,
+            < 90 => 530 + (charLevel - 80) * 13,
+            _    => 660 + (charLevel - 90) * 14,
+        };
+
+        return Math.Min(sheetIlvl, Math.Max(1, levelCap));
     }
 
     /// <summary>Whether the character has unlocked an instance content (same flag the Duty Finder
@@ -4414,7 +4441,9 @@ public sealed class FarmController : IDisposable
                     twoHanded = (mainRow.Value.EquipSlotCategory.ValueNullable?.OffHand ?? 0) != 0;
             }
 
+            var charLevel = (int)(Service.ObjectTable.LocalPlayer?.Level ?? 0);
             var total = 0;
+            var slotDetail = new System.Text.StringBuilder();
             for (var slot = 0; slot < 13 && slot < equipment->Size; slot++)
             {
                 if (slot == 5) // belt — removed from the game, always empty
@@ -4430,8 +4459,9 @@ public sealed class FarmController : IDisposable
                 if (row == null)
                     continue;
 
-                var ilvl = (int)row.Value.LevelItem.RowId;
+                var ilvl = EffectiveItemLevel((int)row.Value.LevelItem.RowId, row.Value.LevelEquip, charLevel);
                 total += ilvl;
+                slotDetail.Append($" s{slot}:{item->ItemId}={ilvl}");
 
                 if (slot == 0 && twoHanded)
                     total += ilvl;
@@ -4441,7 +4471,7 @@ public sealed class FarmController : IDisposable
             // A two-hander fills both weapon slots (counted twice above). Verified against the
             // character window: total 9420 / 12 = 785 exact.
             var result = total / 12;
-            Service.PluginLog.Debug($"[SealBreaker] Avg ilvl calc: total={total} twoHanded={twoHanded} result={result}");
+            Service.PluginLog.Debug($"[SealBreaker] Avg ilvl calc: total={total} twoHanded={twoHanded} result={result} —{slotDetail}");
             return result;
         }
         catch

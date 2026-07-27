@@ -12,7 +12,10 @@ internal static class DutyAutoPicker
 {
     public static AutoDutyDuty? PickBestAutoDuty(Configuration cfg, int level, int ilvl, Func<uint, bool> hasPath)
     {
-        if (level <= 0)
+        // Refuse to pick blind: an unreadable ilvl (0, e.g. during zone transitions) must never
+        // bypass the ilvl gate — the descending sort would then select the highest-ilvl duty
+        // of the level tier, exactly the dungeon the character cannot queue for.
+        if (level <= 0 || ilvl <= 0)
             return null;
 
         AutoDutyCatalog.EnsureInitialized();
@@ -25,7 +28,7 @@ internal static class DutyAutoPicker
 
         var ordered = AutoDutyCatalog.Duties
             .Where(d => d.RequiredLevel > 0 && d.RequiredLevel <= level)
-            .Where(d => d.RequiredItemLevel == 0 || ilvl <= 0 || d.RequiredItemLevel <= (uint)ilvl)
+            .Where(d => d.RequiredItemLevel <= (uint)ilvl)
             .Where(d => !wantsNpcParty || d.HasDutySupport)
             .Where(d => FarmController.IsDutyUnlocked(d.InstanceContentId))
             .OrderByDescending(d => d.RequiredLevel)
@@ -44,14 +47,14 @@ internal static class DutyAutoPicker
 
     public static DutySupportDuty? PickBestAds(int level, int ilvl)
     {
-        if (level <= 0)
+        if (level <= 0 || ilvl <= 0)
             return null;
 
         DutySupportCatalog.EnsureInitialized();
         return DutySupportCatalog.Duties
             .Where(d => d.ContentFinderConditionId != 0)
             .Where(d => d.RequiredLevel > 0 && d.RequiredLevel <= level)
-            .Where(d => d.RequiredItemLevel == 0 || ilvl <= 0 || d.RequiredItemLevel <= (uint)ilvl)
+            .Where(d => d.RequiredItemLevel <= (uint)ilvl)
             .Where(d => FarmController.IsDutyUnlocked(d.InstanceContentId))
             .OrderByDescending(d => d.RequiredLevel)
             .ThenByDescending(d => d.RequiredItemLevel)

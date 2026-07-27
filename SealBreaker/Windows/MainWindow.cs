@@ -1576,6 +1576,12 @@ public sealed class MainWindow : Window, IDisposable
             return;
         }
 
+        if (_cachedIlvl <= 0)
+        {
+            _autoPickNote = "can't read your gear right now — try again";
+            return;
+        }
+
         var best = DutyAutoPicker.PickBestAutoDuty(cfg, _cachedLevel, _cachedIlvl, AutoDutyHasPathCached);
         if (best == null)
         {
@@ -1593,6 +1599,12 @@ public sealed class MainWindow : Window, IDisposable
         if (_cachedLevel <= 0)
         {
             _autoPickNote = "log in first";
+            return;
+        }
+
+        if (_cachedIlvl <= 0)
+        {
+            _autoPickNote = "can't read your gear right now — try again";
             return;
         }
 
