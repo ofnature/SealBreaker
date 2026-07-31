@@ -5863,9 +5863,25 @@ public sealed class FarmController : IDisposable
         return _duckBoneItemId;
     }
 
+    /// <summary>
+    /// Occult Crescent accessories (ilvl 745, Blood and Magic lines). These are Expert
+    /// Delivery ELIGIBLE, tradable, and worth a fortune — and they are the BiS set for
+    /// Occult content: each grants +40 Main Attribute in-zone and the Deep Ring completes a
+    /// +240 Main / +6 Special set bonus. Handing one to a Grand Company for seals is an
+    /// unrecoverable mistake, so they are refused BEFORE the list-mode check rather than
+    /// relying on the user having built a blacklist (ListMode defaults to 0 = turn in
+    /// everything). Field 2026-07-31: a coffer dropped one mid-farm.
+    /// </summary>
+    private static readonly HashSet<uint> NeverTurnInItemIds =
+    [
+        49826, 49827, 49828, 49829, 49830, // Occult … of Blood (earrings, necklace, bracelet, ring, deep ring)
+        49831, 49832, 49833, 49834, 49835, // Occult … of Magic
+    ];
+
     private static bool ShouldTurnIn(uint itemId)
     {
         var cfg = Plugin.Config;
+        if (NeverTurnInItemIds.Contains(itemId)) return false;
         if (cfg.ListMode == 0) return true;
         var inList = cfg.FilteredItemIds.Contains(itemId);
         return cfg.ListMode switch { 1 => !inList, 2 => inList, _ => true };
