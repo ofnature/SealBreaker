@@ -589,8 +589,33 @@ public sealed class MainWindow : Window, IDisposable
             text);
     }
 
+    private static readonly string[] FarmModeNames = ["Grand Company seal loop", "Tomestone relic farm (arcanite)"];
+
     private void DrawFarmSettingsSection(Configuration cfg)
     {
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.BeginCombo("Farm mode", FarmModeNames[cfg.FarmMode == Configuration.FarmModeTomestoneRelic ? 1 : 0]))
+        {
+            for (var i = 0; i < FarmModeNames.Length; i++)
+            {
+                if (ImGui.Selectable(FarmModeNames[i], i == cfg.FarmMode))
+                { cfg.FarmMode = i; cfg.Save(); }
+            }
+            ImGui.EndCombo();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Grand Company: duty → Expert Delivery → GC shop buys → repeat.\nTomestone relic: the same full loop (delivery, buys, repair, extraction), plus a\nPhantom Village arcanite-buying detour once Mathematics hits the threshold.");
+
+        ImGui.Spacing();
+
+        if (cfg.FarmMode == Configuration.FarmModeTomestoneRelic)
+        {
+            DrawRelicFarmSettings(cfg);
+            ImGui.Spacing();
+            ImGui.TextColored(UiTheme.Gray, "Leveling mode is unavailable here — the relic farm always runs the dungeon above.");
+        }
+        else
+        {
         var leveling = cfg.LevelingMode;
         if (ImGui.Checkbox("Leveling mode", ref leveling))
         { cfg.LevelingMode = leveling; cfg.Save(); }
@@ -629,6 +654,7 @@ public sealed class MainWindow : Window, IDisposable
             }
 
             ImGui.Unindent();
+        }
         }
 
         ImGui.Spacing();
@@ -696,6 +722,19 @@ public sealed class MainWindow : Window, IDisposable
 
         DrawTomestoneStopCondition(cfg);
 
+        var useTickets = cfg.UseGcTeleportTickets;
+        if (ImGui.Checkbox("Teleport with GC aetheryte tickets", ref useTickets))
+        { cfg.UseGcTeleportTickets = useTickets; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("When a ticket is in your bags, use it to jump straight to your GC's Command\n(no gil, no aethernet hop). Falls back to Lifestream when you run out.\nThe Buy List's port-ticket preset keeps you stocked at 2,000 seals each.");
+        if (useTickets)
+        {
+            var ticketCount = FarmController.GetOwnedItemCount(FarmController.GcTicketItemIdFor(cfg.GrandCompanyIndex));
+            ImGui.SameLine();
+            ImGui.TextColored(ticketCount > 0 ? UiTheme.Gray : UiTheme.Yellow,
+                ticketCount > 0 ? $"({ticketCount} in bags)" : "(none in bags — will use Lifestream)");
+        }
+
         var echo = cfg.EchoToChat;
         if (ImGui.Checkbox("Echo log to chat", ref echo))
         { cfg.EchoToChat = echo; cfg.Save(); }
@@ -704,8 +743,112 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TextColored(ColGray, "Item filter has its own section; town routes live under Grand Company → Towns & routes.");
     }
 
+    private static AutoDutyDuty?[]? _relicDutyCache;
+
+    /// <summary>AutoDuty catalog entry for a relic dungeon (level/ilvl/unlock data), cached per index.</summary>
+    private static AutoDutyDuty? RelicDutyInfo(int idx)
+    {
+        if (_relicDutyCache == null)
+        {
+            var cache = new AutoDutyDuty?[RelicFarmCatalog.Dungeons.Length];
+            for (var i = 0; i < cache.Length; i++)
+            {
+                var territory = RelicFarmCatalog.Dungeons[i].TerritoryType;
+                cache[i] = AutoDutyCatalog.Duties.FirstOrDefault(d => d.TerritoryType == territory);
+            }
+            _relicDutyCache = cache;
+        }
+
+        return idx >= 0 && idx < _relicDutyCache.Length ? _relicDutyCache[idx] : null;
+    }
+
+    private void DrawRelicFarmSettings(Configuration cfg)
+    {
+        ImGui.TextColored(UiTheme.Teal, "Runs the normal GC loop with the dungeon below; once full on Mathematics,\ndetours to Phantom Village to buy arcanite, then farms on.");
+
+        var dungeons = RelicFarmCatalog.Dungeons;
+        var labels = new string[dungeons.Length];
+        var selected = dungeons.Length - 1;
+        for (var i = 0; i < dungeons.Length; i++)
+        {
+            var info = RelicDutyInfo(i);
+            labels[i] = info != null
+                ? $"{dungeons[i].Name} (Lv {info.RequiredLevel}, ilvl {info.RequiredItemLevel}) — {dungeons[i].TomesPerRun} tomes/run"
+                : $"{dungeons[i].Name} — {dungeons[i].TomesPerRun} tomes/run";
+            if (dungeons[i].TerritoryType == cfg.RelicDungeonTerritory)
+                selected = i;
+        }
+
+        var wantsNpcParty = cfg.AutoDutyDutyMode
+            is not (Configuration.AutoDutyModeRegular or Configuration.AutoDutyModeSquadron);
+        var picked = DrawDungeonCombo("Relic dungeon", labels, selected, i =>
+        {
+            var info = RelicDutyInfo(i);
+            return info == null
+                ? ((byte)0, 0u, 0u, true)
+                : (info.RequiredLevel, info.RequiredItemLevel, info.InstanceContentId,
+                   !wantsNpcParty || info.HasDutySupport);
+        });
+        if (picked >= 0 && dungeons[picked].TerritoryType != cfg.RelicDungeonTerritory)
+        { cfg.RelicDungeonTerritory = dungeons[picked].TerritoryType; cfg.Save(); }
+
+        if (RelicDutyInfo(selected) is { } sel)
+            DrawDutyRequirementCheck(sel.RequiredLevel, sel.RequiredItemLevel, sel.InstanceContentId);
+
+        var thr = cfg.RelicTomeSpendThreshold;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputInt("Spend when tomes reach", ref thr, 0, 0))
+        { cfg.RelicTomeSpendThreshold = Math.Clamp(thr, RelicFarmCatalog.ArcaniteTomeCost, 2000); cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Once Mathematics reaches this, the farm detours to Phantom Village after the\nGC turn-in and buys arcanite toward the keep amounts below (500 tomes each).\nThe held cap is 2,000 — leave headroom so runs never waste tomes.");
+
+        ImGui.TextColored(UiTheme.Gray, $"Mathematics: {FarmController.GetRelicTomeCount():N0} / 2,000");
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Arcanite keep amounts — 0 = don't buy. The farm stops once every keep is reached.");
+        if (ImGui.BeginTable("##relicKeeps", 3, ImGuiTableFlags.SizingFixedFit))
+        {
+            foreach (var a in RelicFarmCatalog.Arcanites)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                ImGui.AlignTextToFramePadding();
+                ImGui.TextUnformatted(a.Name);
+
+                ImGui.TableNextColumn();
+                cfg.RelicKeepAmounts.TryGetValue(a.ItemId, out var keep);
+                var owned = FarmController.GetOwnedItemCount(a.ItemId);
+                var met = keep > 0 && owned >= keep;
+                ImGui.TextColored(keep <= 0 ? UiTheme.Gray : met ? UiTheme.Green : UiTheme.Yellow, $"{owned}/{keep}");
+
+                ImGui.TableNextColumn();
+                ImGui.SetNextItemWidth(80);
+                var input = keep;
+                if (ImGui.InputInt($"Keep##relicKeep{a.ItemId}", ref input, 0, 0))
+                {
+                    cfg.RelicKeepAmounts[a.ItemId] = Math.Clamp(input, 0, 99);
+                    cfg.Save();
+                }
+            }
+            ImGui.EndTable();
+        }
+
+        ImGui.Spacing();
+        var ctrl = Plugin.Controller;
+        if (ImGui.Button("Test spend trip") && !ctrl.IsRunning)
+            ctrl.StartRelicSpendTest();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Travel to Phantom Village now and run one buy pass toward the keep amounts,\nwithout running dungeons. Needs at least one keep amount above 0.");
+    }
+
     private static void DrawTomestoneStopCondition(Configuration cfg)
     {
+        if (cfg.FarmMode == Configuration.FarmModeTomestoneRelic)
+        {
+            ImGui.TextColored(UiTheme.Gray, "Tomestone cap stop is off during the relic farm — it spends the tomes itself.");
+            return;
+        }
+
         var stopAtCap = cfg.StopAtTomestoneCap;
         if (ImGui.Checkbox("Stop when tomestones are capped", ref stopAtCap))
         { cfg.StopAtTomestoneCap = stopAtCap; cfg.Save(); }

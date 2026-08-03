@@ -67,6 +67,9 @@ public sealed class FarmController : IDisposable
         [130, 131], // Immortal Flames — Steps of Nald / Thal
     ];
     private static readonly uint[] GcOfficerZoneId = [128, 132, 130];
+    /// <summary>GC aetheryte tickets (Maelstrom/Twin Adder/Immortal Flames) — land at the GC
+    /// Command aethernet shard, replacing both the city teleport and the sub-zone hop.</summary>
+    private static readonly uint[] GcAetheryteTicketItemId = [21069, 21070, 21071];
     private static readonly string[] GcCityTeleportCommand =
     [
         "Limsa Lominsa Lower Decks",
@@ -183,6 +186,7 @@ public sealed class FarmController : IDisposable
         OpenMateriaExtraction, ProcessMateriaExtraction,
         OpenDutySupport, QueueDutySupport,
         CheckGcLoop, CycleComplete, Error,
+        CheckTomeSpend, SpendRelicTomes,
     }
 
     public FarmState State         { get; private set; } = FarmState.Idle;
@@ -193,7 +197,7 @@ public sealed class FarmController : IDisposable
     public bool      IsDeliveryTest => _deliveryTestMode;
     public bool      IsShopTest     => _shopTestMode;
     public bool      IsExtractTest  => _extractTestMode;
-    public bool      IsAnyTestMode  => _repairTestMode || _deliveryTestMode || _shopTestMode || _extractTestMode;
+    public bool      IsAnyTestMode  => _repairTestMode || _deliveryTestMode || _shopTestMode || _extractTestMode || _relicSpendTestMode;
     public string    StatusMessage { get; private set; } = "Idle";
     public string?   LastError     { get; private set; }
     public int       TotalCycles    { get; private set; }
@@ -361,6 +365,21 @@ public sealed class FarmController : IDisposable
             return;
         }
 
+        if (Plugin.Config.FarmMode == Configuration.FarmModeTomestoneRelic)
+        {
+            if (Plugin.Config.DutyRunner != 0)
+            {
+                Log("Cannot start — the tomestone relic farm requires AutoDuty (switch Duty runner on the Duty page).");
+                return;
+            }
+
+            if (!AnyRelicKeepEnabled(Plugin.Config))
+            {
+                Log("Cannot start — set at least one arcanite Keep amount above 0 (Farm settings).");
+                return;
+            }
+        }
+
         IsRunning = true; TotalCycles = 0; TotalRuns = 0; TotalSeals = 0;
         TotalDuckbones = 0; StartTime = DateTime.Now; _runsThisCycle = 0; _cycleCounted = false; LastError = null;
         StopAfterRunRequested = false;
@@ -370,6 +389,7 @@ public sealed class FarmController : IDisposable
         _deliveryFinishing = false; _expectNpcMenu = false;
         _automationOwnsGcPersonnelUi = false;
         _repairTestMode = false; _deliveryTestMode = false; _shopTestMode = false; _extractTestMode = false;
+        _relicSpendTestMode = false;
         _oneShotBuyEntry = null;
         _oneShotBuyAttemptSent = false;
         _adsRepairAttemptedBeforeDuty = false;
@@ -394,7 +414,9 @@ public sealed class FarmController : IDisposable
         }
 
         GotoState(FarmState.CheckSealSpend);
-        Log($"SealBreaker v{PluginVersion} started — current seals: {GetCurrentSeals():N0}");
+        Log(Plugin.Config.FarmMode == Configuration.FarmModeTomestoneRelic
+            ? $"SealBreaker v{PluginVersion} started — tomestone relic farm, Mathematics: {GetRelicTomeCount():N0}"
+            : $"SealBreaker v{PluginVersion} started — current seals: {GetCurrentSeals():N0}");
     }
 
     public void StartExpertDeliveryTest()
@@ -623,6 +645,7 @@ public sealed class FarmController : IDisposable
         _deliveryTestMode = false;
         _shopTestMode = false;
         _extractTestMode = false;
+        _relicSpendTestMode = false;
         _oneShotBuyEntry = null;
         _oneShotBuyAttemptSent = false;
         _automationOwnsGcPersonnelUi = false;
@@ -725,6 +748,27 @@ public sealed class FarmController : IDisposable
                     Log($"{TomestoneCapLabel(cfg)} — stopping.");
                     Stop();
                     break;
+                }
+
+                // Relic mode: the GC loop already ran; detour to Phantom Village at the cycle
+                // boundary when full on tomes, and stop for good once every keep is reached.
+                if (cfg.FarmMode == Configuration.FarmModeTomestoneRelic && !IsMidDutyCycle(cfg))
+                {
+                    if (RelicKeepTargetsMet(cfg))
+                    {
+                        Log($"Tomestone farm complete — all arcanite keep amounts reached. {RelicKeepSummary(cfg)}");
+                        Stop();
+                        break;
+                    }
+
+                    var tomes = GetRelicTomeCount();
+                    if (tomes >= cfg.RelicTomeSpendThreshold && tomes >= RelicFarmCatalog.ArcaniteTomeCost)
+                    {
+                        Log($"Mathematics at {tomes:N0}/{cfg.RelicTomeSpendThreshold:N0} — Phantom Village detour before the next duty");
+                        _currentTask = TravelAndSpendRelicTomesAsync();
+                        GotoState(FarmState.SpendRelicTomes);
+                        break;
+                    }
                 }
 
                 if (IsMidDutyCycle(cfg))
@@ -893,6 +937,15 @@ public sealed class FarmController : IDisposable
                     break;
                 }
 
+                if (cfg.UseGcTeleportTickets && TryUseGcAetheryteTicket(gcIdx))
+                {
+                    _gcTicketTeleportUsed = true;
+                    _zoneWaitStartTime = DateTime.Now;
+                    GotoState(FarmState.WaitingForZone);
+                    break;
+                }
+
+                _gcTicketTeleportUsed = false;
                 ExecuteLifestreamTeleport(GcCityTeleportCommand[gcIdx]);
                 _zoneWaitStartTime = DateTime.Now;
                 GotoState(FarmState.WaitingForZone);
@@ -913,12 +966,26 @@ public sealed class FarmController : IDisposable
                     break;
                 }
 
+                // A ticket use can fizzle (cast interrupted, weather); if nothing is happening
+                // well past the cast time, fall back to the normal Lifestream teleport once.
+                if (_gcTicketTeleportUsed
+                    && !Service.Condition[ConditionFlag.Casting]
+                    && DateTime.Now - _zoneWaitStartTime > TimeSpan.FromSeconds(12))
+                {
+                    _gcTicketTeleportUsed = false;
+                    Log("WARN: GC aetheryte ticket teleport didn't land — falling back to Lifestream");
+                    ExecuteLifestreamTeleport(GcCityTeleportCommand[gcIdx]);
+                    _zoneWaitStartTime = DateTime.Now;
+                    break;
+                }
+
                 if (!IsInGcAcceptedZone(gcIdx, Service.ClientState.TerritoryType))
                 {
                     StatusQuiet($"Waiting for GC zone (current {Service.ClientState.TerritoryType})...");
                     break;
                 }
 
+                _gcTicketTeleportUsed = false;
                 GotoState(FarmState.CheckSubZone);
                 break;
             }
@@ -1086,6 +1153,34 @@ public sealed class FarmController : IDisposable
                 GotoState(FarmState.StartDuty);
                 break;
 
+            case FarmState.CheckTomeSpend:
+            {
+                if (RelicKeepTargetsMet(cfg))
+                {
+                    Log($"Tomestone farm complete — all arcanite keep amounts reached. {RelicKeepSummary(cfg)}");
+                    Stop();
+                    break;
+                }
+
+                var tomes = GetRelicTomeCount();
+                if (tomes >= cfg.RelicTomeSpendThreshold && tomes >= RelicFarmCatalog.ArcaniteTomeCost)
+                {
+                    Log($"Mathematics at {tomes:N0}/{cfg.RelicTomeSpendThreshold:N0} — heading to Phantom Village to spend");
+                    _currentTask = TravelAndSpendRelicTomesAsync();
+                    GotoState(FarmState.SpendRelicTomes);
+                }
+                else
+                {
+                    Log($"Mathematics at {tomes:N0}/{cfg.RelicTomeSpendThreshold:N0} — starting duties. {RelicKeepSummary(cfg)}");
+                    GotoState(FarmState.StartDuty);
+                }
+                break;
+            }
+
+            case FarmState.SpendRelicTomes:
+                // Driven by TravelAndSpendRelicTomesAsync via _currentTask.
+                break;
+
             case FarmState.Idle:
             case FarmState.Error:
                 break;
@@ -1160,6 +1255,34 @@ public sealed class FarmController : IDisposable
         }
 
         return false;
+    }
+
+    public static uint GcTicketItemIdFor(int gcIdx) =>
+        GcAetheryteTicketItemId[Math.Clamp(gcIdx, 0, GcAetheryteTicketItemId.Length - 1)];
+
+    private bool _gcTicketTeleportUsed;
+
+    /// <summary>Use the GC's aetheryte ticket when one is in the bags — lands at the Command
+    /// aethernet shard, skipping the city teleport, gil cost, and sub-zone hop.</summary>
+    private bool TryUseGcAetheryteTicket(int gcIdx)
+    {
+        var itemId = GcAetheryteTicketItemId[gcIdx];
+        var count = GetInventoryItemCount(itemId);
+        if (count <= 0)
+            return false;
+
+        unsafe
+        {
+            var am = ActionManager.Instance();
+            if (am == null || am->GetActionStatus(ActionType.Item, itemId) != 0)
+                return false;
+
+            if (!am->UseAction(ActionType.Item, itemId, 0xE0000000, 65535))
+                return false;
+        }
+
+        Log($"Teleporting with a GC aetheryte ticket ({count - 1} left in bags)");
+        return true;
     }
 
     private static void ExecuteLifestreamTeleport(string command)
@@ -2765,7 +2888,10 @@ public sealed class FarmController : IDisposable
         if (State is FarmState.OpenExpertDelivery or FarmState.OpenRepairMenu or FarmState.OpenGCShop
             or FarmState.NavigateToGcTarget or FarmState.NavigateToOfficer or FarmState.NavigateToShop
             or FarmState.NavigateToRepair or FarmState.TeleportToGC or FarmState.WaitingForZone
-            or FarmState.CheckSubZone or FarmState.WaitingForSubZone)
+            or FarmState.CheckSubZone or FarmState.WaitingForSubZone
+            // Relic spend trip: Lifestream drives the Tuliyollal aetheryte's SelectString for the
+            // Phantom Village aethernet hop — dismissing it clicks "Register Free Destination".
+            or FarmState.SpendRelicTomes or FarmState.CheckTomeSpend)
             return;
 
         if (!_deliveryFinishing && !IsGcOfficerMenuOpen())
@@ -3308,7 +3434,9 @@ public sealed class FarmController : IDisposable
 
     private async Task<bool> LaunchDutyRunnerAsync()
     {
-        if (Plugin.Config.LevelingMode)
+        if (Plugin.Config.FarmMode == Configuration.FarmModeTomestoneRelic)
+            ApplyRelicModeDutyPick(Plugin.Config);
+        else if (Plugin.Config.LevelingMode)
             await Service.Framework.RunOnFrameworkThread(() => ApplyLevelingModeDutyPick(Plugin.Config));
 
         var runner = Plugin.Config.DutyRunner;
@@ -3431,6 +3559,27 @@ public sealed class FarmController : IDisposable
             DutySupportCatalog.ApplySelection(cfg, best);
             Log($"Leveling mode: duty upgraded to {best.Name} (Lv {best.RequiredLevel}{(best.RequiredItemLevel > 0 ? $", ilvl {best.RequiredItemLevel}" : "")}) at level {level}, ilvl {ilvl}");
         }
+    }
+
+    /// <summary>Tomestone relic mode: force the AutoDuty selection to the configured relic dungeon
+    /// so a stale Duty-page pick can never send the farm somewhere without Mathematics.</summary>
+    private void ApplyRelicModeDutyPick(Configuration cfg)
+    {
+        var relic = RelicFarmCatalog.SelectedOrDefault(cfg);
+        AutoDutyCatalog.EnsureInitialized();
+        var duty = AutoDutyCatalog.Duties.FirstOrDefault(d => d.TerritoryType == relic.TerritoryType);
+        if (duty == null)
+        {
+            Log($"WARN: {relic.Name} (territory {relic.TerritoryType}) not in the AutoDuty catalog — keeping the current duty selection");
+            return;
+        }
+
+        if (duty.TerritoryType == cfg.AutoDutyTerritoryType
+            && duty.ContentFinderConditionId == cfg.AutoDutyContentFinderConditionId)
+            return;
+
+        AutoDutyCatalog.ApplySelection(cfg, duty);
+        Log($"Tomestone farm: duty set to {duty.Name}");
     }
 
     // ── Gear equip (leveling mode) ────────────────────────────
@@ -5944,12 +6093,279 @@ public sealed class FarmController : IDisposable
         if (!cfg.StopAtTomestoneCap)
             return false;
 
+        // The relic farm spends tomes itself — the cap-stop is a Grand Company mode concern
+        // and would otherwise halt the farm right before a spend trip.
+        if (cfg.FarmMode == Configuration.FarmModeTomestoneRelic)
+            return false;
+
         if (ResolveStopTomestone(cfg) is not { } info)
             return false;
 
         var (held, heldCap, weekly, weeklyLimit) = GetTomestoneStatus(info);
         return (heldCap > 0 && held >= heldCap)
             || (weeklyLimit > 0 && weekly >= weeklyLimit);
+    }
+
+    // ── Tomestone relic farm (Phantom Village arcanite) ───────
+
+    private bool _relicSpendTestMode;
+    public bool IsRelicSpendTest => _relicSpendTestMode;
+
+    private static uint _relicTomeItemId;
+
+    /// <summary>The relic-shop currency — the newest uncapped tomestone (Mathematics today),
+    /// resolved from the sheet so it survives the next tomestone generation.</summary>
+    public static uint RelicTomeItemId()
+    {
+        if (_relicTomeItemId != 0)
+            return _relicTomeItemId;
+
+        _relicTomeItemId = DefaultStopTomestone()?.ItemId ?? 48;
+        return _relicTomeItemId;
+    }
+
+    public static int GetRelicTomeCount() => GetTomestoneCount(RelicTomeItemId());
+
+    public static int GetOwnedItemCount(uint itemId) => GetInventoryItemCount(itemId);
+
+    public static bool AnyRelicKeepEnabled(Configuration cfg)
+    {
+        foreach (var a in RelicFarmCatalog.Arcanites)
+        {
+            if (cfg.RelicKeepAmounts.TryGetValue(a.ItemId, out var keep) && keep > 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Enabled keep rows in catalog order: (arcanite, keep, owned, deficit).</summary>
+    internal static List<(RelicArcanite Arcanite, int Keep, int Owned, int Deficit)> RelicDeficits(Configuration cfg)
+    {
+        var rows = new List<(RelicArcanite, int, int, int)>();
+        foreach (var a in RelicFarmCatalog.Arcanites)
+        {
+            if (!cfg.RelicKeepAmounts.TryGetValue(a.ItemId, out var keep) || keep <= 0)
+                continue;
+
+            var owned = GetInventoryItemCount(a.ItemId);
+            rows.Add((a, keep, owned, Math.Max(0, keep - owned)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>True once every enabled keep amount is owned (and at least one is enabled).</summary>
+    public static bool RelicKeepTargetsMet(Configuration cfg)
+    {
+        var any = false;
+        foreach (var row in RelicDeficits(cfg))
+        {
+            any = true;
+            if (row.Deficit > 0)
+                return false;
+        }
+
+        return any;
+    }
+
+    private static string RelicKeepSummary(Configuration cfg) =>
+        "Keeps: " + string.Join(", ", RelicDeficits(cfg).Select(r => $"{r.Arcanite.Name} {r.Owned}/{r.Keep}"));
+
+    /// <summary>Farm-tab test: travel to Phantom Village and run one spend pass toward the keeps.</summary>
+    public void StartRelicSpendTest()
+    {
+        if (IsRunning)
+        {
+            Log("Cannot start the relic spend test while the farm is running — stop it first");
+            return;
+        }
+
+        if (!IpcManager.VnavAvailable) { SetError("vnavmesh IPC not available"); return; }
+        if (!IpcManager.LifestreamAvailable) { SetError("Lifestream IPC not available"); return; }
+        if (!AnyRelicKeepEnabled(Plugin.Config))
+        {
+            SetError("Set at least one arcanite Keep amount above 0 first");
+            return;
+        }
+
+        _relicSpendTestMode = true;
+        IsRunning = true;
+        LastError = null;
+        StartTime = DateTime.Now;
+        Log("Relic spend test — traveling to Phantom Village...");
+        _currentTask = TravelAndSpendRelicTomesAsync();
+        GotoState(FarmState.SpendRelicTomes);
+    }
+
+    private async Task TravelAndSpendRelicTomesAsync()
+    {
+        try
+        {
+            var cfg = Plugin.Config;
+
+            // 1) Get to Phantom Village.
+            if (Service.ClientState.TerritoryType != RelicFarmCatalog.PhantomVillageTerritory)
+            {
+                await StatusAsync("Teleporting to Phantom Village...");
+                var dest = RelicFarmCatalog.PhantomVillagePlaceName();
+                await Service.Framework.RunOnFrameworkThread(() => ExecuteLifestreamTeleport(dest));
+
+                var zoneDeadline = DateTime.UtcNow.AddSeconds(120);
+                while (IsRunning && DateTime.UtcNow < zoneDeadline)
+                {
+                    if (Service.ClientState.TerritoryType == RelicFarmCatalog.PhantomVillageTerritory
+                        && !IpcManager.LifestreamIsBusy()
+                        && await Service.Framework.RunOnFrameworkThread(CanRunWorldAutomation))
+                        break;
+
+                    await Task.Delay(500);
+                }
+
+                if (!IsRunning)
+                    return;
+
+                if (Service.ClientState.TerritoryType != RelicFarmCatalog.PhantomVillageTerritory)
+                {
+                    await SetErrorAsync($"Teleport to Phantom Village timed out (zone {Service.ClientState.TerritoryType})");
+                    return;
+                }
+
+                await Task.Delay(2000); // let the zone and object table settle
+            }
+
+            // 2) Walk to the exchange NPC.
+            var npcName = RelicFarmCatalog.TomeExchangeNpcName();
+            var (npc, npcPos) = await Service.Framework.RunOnFrameworkThread(() =>
+            {
+                var obj = Service.ObjectTable.FirstOrDefault(o =>
+                    !string.IsNullOrWhiteSpace(o.Name.TextValue)
+                    && o.Name.TextValue.Equals(npcName, StringComparison.OrdinalIgnoreCase));
+                return (obj, obj?.Position ?? Vector3.Zero);
+            });
+
+            if (npc == null)
+            {
+                await SetErrorAsync($"Could not find {npcName} in Phantom Village — move near the aetheryte and retry");
+                return;
+            }
+
+            var dist = await GetPlayerDistToAsync(npcPos);
+            if (dist.HasValue && dist.Value > NpcApproachRange)
+            {
+                await StatusAsync($"Walking to {npcName}...");
+                if (!await PathfindToPointAsync(npcPos, NpcApproachRange, 60_000))
+                {
+                    await SetErrorAsync($"Could not navigate to {npcName}");
+                    return;
+                }
+
+                IpcManager.VnavStop();
+                await WaitForMovementStopAsync(800);
+            }
+
+            if (!IsRunning)
+                return;
+
+            // 3) Open the exchange.
+            await LogAsync($"Interacting with {npcName}...");
+            await Service.Framework.RunOnFrameworkThread(() => TargetAndInteract(npc));
+            if (!await WaitForAddonVisibleAsync("ShopExchangeCurrency", 8000))
+            {
+                await Service.Framework.RunOnFrameworkThread(() => TargetAndInteract(npc));
+                if (!await WaitForAddonVisibleAsync("ShopExchangeCurrency", 8000))
+                {
+                    await SetErrorAsync("Tome exchange window (ShopExchangeCurrency) did not open");
+                    return;
+                }
+            }
+
+            // 4) Buy toward the keep amounts, priority = catalog order.
+            var boughtAnything = false;
+            for (var safety = 0; safety < 32 && IsRunning; safety++)
+            {
+                var tomes = await Service.Framework.RunOnFrameworkThread(GetRelicTomeCount);
+                var affordable = tomes / RelicFarmCatalog.ArcaniteTomeCost;
+                if (affordable <= 0)
+                    break;
+
+                var next = (await Service.Framework.RunOnFrameworkThread(() => RelicDeficits(cfg)))
+                    .FirstOrDefault(r => r.Deficit > 0);
+                if (next.Arcanite.ItemId == 0)
+                    break; // every enabled keep amount is met
+
+                var qty = Math.Min(next.Deficit, affordable);
+                await LogAsync($"Buying {qty}× {next.Arcanite.Name} ({qty * RelicFarmCatalog.ArcaniteTomeCost:N0} tomes)...");
+                await Service.Framework.RunOnFrameworkThread(() =>
+                    SendCallback("ShopExchangeCurrency", true, 0, next.Arcanite.PurchaseId, qty));
+
+                var confirmDeadline = DateTime.UtcNow.AddSeconds(3);
+                while (DateTime.UtcNow < confirmDeadline)
+                {
+                    if (await Service.Framework.RunOnFrameworkThread(() =>
+                            IsSelectYesnoVisible() || GetRelicTomeCount() < tomes))
+                        break;
+
+                    await Task.Delay(150);
+                }
+
+                if (await Service.Framework.RunOnFrameworkThread(() => IsSelectYesnoVisible()))
+                    await Service.Framework.RunOnFrameworkThread(() => ClickSelectYesno());
+
+                var verified = false;
+                var verifyDeadline = DateTime.UtcNow.AddSeconds(5);
+                while (DateTime.UtcNow < verifyDeadline)
+                {
+                    if (await Service.Framework.RunOnFrameworkThread(GetRelicTomeCount) < tomes)
+                    {
+                        verified = true;
+                        break;
+                    }
+
+                    await Task.Delay(150);
+                }
+
+                if (!verified)
+                {
+                    await SetErrorAsync($"Arcanite purchase did not go through ({next.Arcanite.Name} ×{qty}) — tome count unchanged");
+                    return;
+                }
+
+                boughtAnything = true;
+                await LogAsync($"Bought {qty}× {next.Arcanite.Name} — now {next.Owned + qty}/{next.Keep}");
+                await Task.Delay(600);
+            }
+
+            if (!boughtAnything)
+                await LogAsync("No arcanite purchases were possible — check keep amounts and tome count");
+
+            // 5) Close the shop.
+            for (var i = 0; i < 10; i++)
+            {
+                if (!await Service.Framework.RunOnFrameworkThread(() => IsAddonVisible("ShopExchangeCurrency")))
+                    break;
+
+                await Service.Framework.RunOnFrameworkThread(() => CloseAddonSafe("ShopExchangeCurrency"));
+                await Task.Delay(400);
+            }
+
+            if (_relicSpendTestMode)
+            {
+                await LogAsync($"Relic spend test complete. {RelicKeepSummary(cfg)}");
+                Stop();
+                return;
+            }
+
+            if (!IsRunning)
+                return;
+
+            await GotoStateAsync(FarmState.CheckTomeSpend);
+        }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Error(ex, "[SealBreaker] Relic tome spend failed");
+            await SetErrorAsync($"Relic tome spend failed: {ex.Message}");
+        }
     }
 
     public static int GetDuckBoneInventoryCount() =>

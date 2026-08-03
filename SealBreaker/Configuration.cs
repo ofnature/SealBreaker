@@ -98,6 +98,28 @@ public class Configuration : IPluginConfiguration
 
     public int Version { get; set; } = 20;
 
+    // ── Farm mode ─────────────────────────────────────────────
+    public const int FarmModeGrandCompany = 0;
+    public const int FarmModeTomestoneRelic = 1;
+
+    /// <summary>0 = Grand Company seal loop, 1 = Tomestone relic farm
+    /// (run a Mathematics dungeon, buy arcanite in Phantom Village).</summary>
+    public int FarmMode { get; set; }
+
+    /// <summary>Teleport to the GC with an aetheryte ticket when one is in the bags
+    /// (lands at Command directly); falls back to Lifestream when out.</summary>
+    public bool UseGcTeleportTickets { get; set; } = true;
+
+    /// <summary>Dungeon the tomestone relic farm runs (territory type).</summary>
+    public uint RelicDungeonTerritory { get; set; } = 1345; // The Clyteum
+
+    /// <summary>Head to Phantom Village to spend once Mathematics reaches this many tomes.</summary>
+    public int RelicTomeSpendThreshold { get; set; } = 1500;
+
+    /// <summary>Arcanite keep amounts (itemId → how many to own). 0/absent = don't buy that one.
+    /// The farm stops once every non-zero keep amount is reached.</summary>
+    public Dictionary<uint, int> RelicKeepAmounts { get; set; } = new();
+
     // ── Duty ──────────────────────────────────────────────────
     /// <summary>Locked to 1 unless AllowMultiRunPerCycle is accepted — multi-run cycles are the risky path.</summary>
     public int RunsPerCycle { get; set; } = 1;
