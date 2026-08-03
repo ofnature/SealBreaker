@@ -1269,20 +1269,37 @@ public sealed class FarmController : IDisposable
         var itemId = GcAetheryteTicketItemId[gcIdx];
         var count = GetInventoryItemCount(itemId);
         if (count <= 0)
+        {
+            Log("No GC aetheryte tickets in bags — teleporting via Lifestream");
             return false;
+        }
 
         unsafe
         {
             var am = ActionManager.Instance();
-            if (am == null || am->GetActionStatus(ActionType.Item, itemId) != 0)
+            if (am == null)
                 return false;
 
-            if (!am->UseAction(ActionType.Item, itemId, 0xE0000000, 65535))
+            // GetActionStatus is unreliable for inventory items (often nonzero while the item
+            // is perfectly usable), so it only informs the log — it never gates the attempt.
+            var status = am->GetActionStatus(ActionType.Item, itemId);
+            if (am->UseAction(ActionType.Item, itemId, 0xE0000000, 65535))
+            {
+                Log($"Teleporting with a GC aetheryte ticket ({count - 1} left in bags)");
+                return true;
+            }
+
+            var agent = AgentInventoryContext.Instance();
+            if (agent == null)
+            {
+                Log($"WARN: GC aetheryte ticket use failed (action status {status}) — teleporting via Lifestream");
                 return false;
+            }
+
+            agent->UseItem(itemId);
+            Log($"Teleporting with a GC aetheryte ticket via inventory agent (action status {status}, {count - 1} left)");
+            return true;
         }
-
-        Log($"Teleporting with a GC aetheryte ticket ({count - 1} left in bags)");
-        return true;
     }
 
     private static void ExecuteLifestreamTeleport(string command)
