@@ -694,12 +694,62 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("0 = run endlessly. Otherwise the farm finishes that run's GC turn-in/buying, then stops gracefully.");
 
+        DrawTomestoneStopCondition(cfg);
+
         var echo = cfg.EchoToChat;
         if (ImGui.Checkbox("Echo log to chat", ref echo))
         { cfg.EchoToChat = echo; cfg.Save(); }
 
         ImGui.Spacing();
         ImGui.TextColored(ColGray, "Item filter has its own section; town routes live under Grand Company → Towns & routes.");
+    }
+
+    private static void DrawTomestoneStopCondition(Configuration cfg)
+    {
+        var stopAtCap = cfg.StopAtTomestoneCap;
+        if (ImGui.Checkbox("Stop when tomestones are capped", ref stopAtCap))
+        { cfg.StopAtTomestoneCap = stopAtCap; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Finishes that run's GC turn-in/buying, then stops once the tomestone below\nhits its 2,000 held cap (or its weekly limit, for the weekly-capped one).");
+
+        if (!stopAtCap)
+            return;
+
+        var tomestones = FarmController.CurrentTomestones();
+        if (tomestones.Count == 0)
+        {
+            ImGui.TextColored(UiTheme.Yellow, "No tomestones found in the game data.");
+            return;
+        }
+
+        var trackedId = FarmController.ResolveStopTomestone(cfg)?.ItemId ?? 0;
+        var selected = 0;
+        for (var i = 0; i < tomestones.Count; i++)
+        {
+            if (tomestones[i].ItemId == trackedId)
+            { selected = i; break; }
+        }
+
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.BeginCombo("Tomestone", tomestones[selected].Name))
+        {
+            for (var i = 0; i < tomestones.Count; i++)
+            {
+                if (ImGui.Selectable(tomestones[i].Name, i == selected))
+                { cfg.TomestoneStopItemId = tomestones[i].ItemId; cfg.Save(); }
+            }
+            ImGui.EndCombo();
+        }
+
+        var info = tomestones[selected];
+        var (held, heldCap, weekly, weeklyLimit) = FarmController.GetTomestoneStatus(info);
+        var capped = (heldCap > 0 && held >= heldCap) || (weeklyLimit > 0 && weekly >= weeklyLimit);
+
+        var text = $"Held {held:N0}/{heldCap:N0}";
+        if (weeklyLimit > 0)
+            text += $"  ·  This week {weekly:N0}/{weeklyLimit:N0}";
+
+        ImGui.TextColored(capped ? UiTheme.Yellow : UiTheme.Gray, capped ? text + "  —  capped" : text);
     }
 
     private static int _buyListSyncedGc = -1;

@@ -720,6 +720,13 @@ public sealed class FarmController : IDisposable
                     break;
                 }
 
+                if (TomestoneCapReached(cfg))
+                {
+                    Log($"{TomestoneCapLabel(cfg)} — stopping.");
+                    Stop();
+                    break;
+                }
+
                 if (IsMidDutyCycle(cfg))
                 {
                     _currentTask = ContinueDutyAsync();
@@ -775,7 +782,8 @@ public sealed class FarmController : IDisposable
 
                     if (dutyStopped && (_runsThisCycle + 1 >= cfg.RunsPerCycle
                                         || StopAfterRunRequested
-                                        || (cfg.TotalRunLimit > 0 && TotalRuns + 1 >= cfg.TotalRunLimit)))
+                                        || (cfg.TotalRunLimit > 0 && TotalRuns + 1 >= cfg.TotalRunLimit)
+                                        || TomestoneCapReached(cfg)))
                     {
                         if (!_adsLeaveRequestedForFinalRun)
                         {
@@ -813,7 +821,11 @@ public sealed class FarmController : IDisposable
                     if (runLimitReached && _runsThisCycle < cfg.RunsPerCycle)
                         Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — GC turn-in next, then stopping");
 
-                    if (_runsThisCycle >= cfg.RunsPerCycle || runLimitReached)
+                    var tomestoneCapReached = TomestoneCapReached(cfg);
+                    if (tomestoneCapReached && _runsThisCycle < cfg.RunsPerCycle)
+                        Log($"{TomestoneCapLabel(cfg)} — GC turn-in next, then stopping");
+
+                    if (_runsThisCycle >= cfg.RunsPerCycle || runLimitReached || tomestoneCapReached)
                     {
                         _deliveryListEmpty = false;
                         _dutyExitReadyAt   = null;
@@ -5831,6 +5843,113 @@ public sealed class FarmController : IDisposable
             var id = Plugin.Config.GrandCompanyIndex switch { 0 => 20u, 1 => 21u, 2 => 22u, _ => 20u };
             return (int)InventoryManager.Instance()->GetInventoryItemCount(id);
         }
+    }
+
+    /// <summary>A tomestone the currency window still lists, with the caps that stop it accruing.</summary>
+    public readonly record struct TomestoneInfo(uint ItemId, string Name, int HeldCap, int WeeklyLimit);
+
+    private static List<TomestoneInfo>? _tomestones;
+
+    /// <summary>The current tomestones — the newest sheet row for each currency slot, which is what
+    /// the game shows. Older rows in a slot are retired tomestones and are left out.</summary>
+    public static IReadOnlyList<TomestoneInfo> CurrentTomestones()
+    {
+        if (_tomestones != null)
+            return _tomestones;
+
+        var bySlot = new Dictionary<sbyte, TomestoneInfo>();
+        foreach (var row in Service.DataManager.GetExcelSheet<TomestonesItem>())
+        {
+            if (row.CurrencyInventorySlot < 0)
+                continue;
+
+            var item = row.Item.ValueNullable;
+            if (item == null || item.Value.RowId == 0)
+                continue;
+
+            bySlot[row.CurrencyInventorySlot] = new TomestoneInfo(
+                item.Value.RowId,
+                item.Value.Name.ExtractText(),
+                (int)item.Value.StackSize,
+                row.Tomestones.ValueNullable?.WeeklyLimit ?? 0);
+        }
+
+        _tomestones = bySlot.Values.OrderBy(t => t.ItemId).ToList();
+        return _tomestones;
+    }
+
+    /// <summary>The tomestone the stop condition watches by default — the newest one without a
+    /// weekly cap, i.e. the one an endless dungeon farm actually piles up.</summary>
+    public static TomestoneInfo? DefaultStopTomestone()
+    {
+        var list = CurrentTomestones();
+        return list.LastOrDefault(t => t.WeeklyLimit == 0) is { ItemId: not 0 } uncapped
+            ? uncapped
+            : list.Count > 0 ? list[^1] : null;
+    }
+
+    public static TomestoneInfo? ResolveStopTomestone(Configuration cfg)
+    {
+        if (cfg.TomestoneStopItemId == 0)
+            return DefaultStopTomestone();
+
+        foreach (var t in CurrentTomestones())
+        {
+            if (t.ItemId == cfg.TomestoneStopItemId)
+                return t;
+        }
+
+        return DefaultStopTomestone();
+    }
+
+    public static unsafe int GetTomestoneCount(uint itemId) =>
+        (int)InventoryManager.Instance()->GetTomestoneCount(itemId);
+
+    /// <summary>How many of the weekly-capped tomestone were earned this week.</summary>
+    public static unsafe int GetWeeklyAcquiredTomestones() =>
+        InventoryManager.Instance()->GetWeeklyAcquiredTomestoneCount();
+
+    /// <summary>Held count and — when the tracked tomestone is the weekly-capped one — this week's
+    /// tally, against their caps.</summary>
+    public static (int Held, int HeldCap, int Weekly, int WeeklyLimit) GetTomestoneStatus(TomestoneInfo info)
+    {
+        var held = GetTomestoneCount(info.ItemId);
+        if (info.WeeklyLimit <= 0)
+            return (held, info.HeldCap, 0, 0);
+
+        unsafe
+        {
+            var limit = InventoryManager.GetLimitedTomestoneWeeklyLimit();
+            if (limit <= 0)
+                limit = info.WeeklyLimit;
+            return (held, info.HeldCap, GetWeeklyAcquiredTomestones(), limit);
+        }
+    }
+
+    /// <summary>True once the tracked tomestone can't grow any further — held cap reached, or the
+    /// weekly allowance spent on the weekly-capped tomestone.</summary>
+    public static string TomestoneCapLabel(Configuration cfg)
+    {
+        if (ResolveStopTomestone(cfg) is not { } info)
+            return "Tomestone cap reached";
+
+        var (held, heldCap, weekly, weeklyLimit) = GetTomestoneStatus(info);
+        return weeklyLimit > 0 && weekly >= weeklyLimit
+            ? $"{info.Name} weekly limit reached ({weekly:N0}/{weeklyLimit:N0})"
+            : $"{info.Name} capped ({held:N0}/{heldCap:N0})";
+    }
+
+    public static bool TomestoneCapReached(Configuration cfg)
+    {
+        if (!cfg.StopAtTomestoneCap)
+            return false;
+
+        if (ResolveStopTomestone(cfg) is not { } info)
+            return false;
+
+        var (held, heldCap, weekly, weeklyLimit) = GetTomestoneStatus(info);
+        return (heldCap > 0 && held >= heldCap)
+            || (weeklyLimit > 0 && weekly >= weeklyLimit);
     }
 
     public static int GetDuckBoneInventoryCount() =>

@@ -108,6 +108,14 @@ public class Configuration : IPluginConfiguration
     /// <summary>Stop the farm (after GC turn-in) once this many total runs complete this session. 0 = endless.</summary>
     public int TotalRunLimit { get; set; }
 
+    /// <summary>Stop the farm (after GC turn-in) once the tracked tomestone hits its cap —
+    /// the 2,000 held cap, or the weekly limit for the weekly-capped tomestone.</summary>
+    public bool StopAtTomestoneCap { get; set; }
+
+    /// <summary>Item ID of the tomestone <see cref="StopAtTomestoneCap"/> watches.
+    /// 0 = the newest uncapped tomestone (resolved from the sheet at first use).</summary>
+    public uint TomestoneStopItemId { get; set; }
+
     /// <summary>Leveling mode: re-pick the best eligible dungeon (level + ilvl + path) before every duty launch.
     /// Groundwork for the auto gear equipper.</summary>
     public bool LevelingMode { get; set; }
