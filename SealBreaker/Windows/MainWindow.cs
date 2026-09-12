@@ -589,12 +589,12 @@ public sealed class MainWindow : Window, IDisposable
             text);
     }
 
-    private static readonly string[] FarmModeNames = ["Grand Company seal loop", "Tomestone relic farm (arcanite)"];
+    private static readonly string[] FarmModeNames = ["Grand Company seal loop", "Tomestone relic farm (arcanite)", "Job leveling (round-robin)", "Moogle tomestone farm"];
 
     private void DrawFarmSettingsSection(Configuration cfg)
     {
         ImGui.SetNextItemWidth(260);
-        if (ImGui.BeginCombo("Farm mode", FarmModeNames[cfg.FarmMode == Configuration.FarmModeTomestoneRelic ? 1 : 0]))
+        if (ImGui.BeginCombo("Farm mode", FarmModeNames[Math.Clamp(cfg.FarmMode, 0, FarmModeNames.Length - 1)]))
         {
             for (var i = 0; i < FarmModeNames.Length; i++)
             {
@@ -604,7 +604,7 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.EndCombo();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Grand Company: duty → Expert Delivery → GC shop buys → repeat.\nTomestone relic: the same full loop (delivery, buys, repair, extraction), plus a\nPhantom Village arcanite-buying detour once Mathematics hits the threshold.");
+            ImGui.SetTooltip("Grand Company: duty → Expert Delivery → GC shop buys → repeat.\nTomestone relic: the same full loop, plus a Phantom Village arcanite detour once\nMathematics hits the threshold.\nJob leveling: the full loop too, switching to your lowest-level job each cycle via\nCharon until every job reaches the gate target.\nMoogle tomestone: run one duty (trials included) on repeat, synced, tracking\nirregular tomestones — with LAN group repair holds.");
 
         ImGui.Spacing();
 
@@ -613,6 +613,14 @@ public sealed class MainWindow : Window, IDisposable
             DrawRelicFarmSettings(cfg);
             ImGui.Spacing();
             ImGui.TextColored(UiTheme.Gray, "Leveling mode is unavailable here — the relic farm always runs the dungeon above.");
+        }
+        else if (cfg.FarmMode == Configuration.FarmModeLeveling)
+        {
+            DrawLevelingFarmSettings(cfg);
+        }
+        else if (cfg.FarmMode == Configuration.FarmModeMoogle)
+        {
+            DrawMoogleFarmSettings(cfg);
         }
         else
         {
@@ -839,6 +847,223 @@ public sealed class MainWindow : Window, IDisposable
             ctrl.StartRelicSpendTest();
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Travel to Phantom Village now and run one buy pass toward the keep amounts,\nwithout running dungeons. Needs at least one keep amount above 0.");
+    }
+
+    private static readonly string[] MoogleRoleNames = ["Solo", "Leader (queues the duty)", "Member (repairs and reports)"];
+    private static int _moogleExpansionFilter = int.MinValue;
+    private static List<FarmController.MoogleTomeStat>? _moogleTomeCache;
+    private static DateTime _moogleTomeCacheAt = DateTime.MinValue;
+
+    private void DrawMoogleFarmSettings(Configuration cfg)
+    {
+        ImGui.TextColored(UiTheme.Teal, "Run one duty on repeat — synced — and track irregular tomestones.\nGroup play: the leader queues, members auto-accept via Charon and call repair\nholds over the Daedalus LAN bridge.");
+
+        var role = Math.Clamp(cfg.MoogleGroupRole, 0, MoogleRoleNames.Length - 1);
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.Combo("Group role", ref role, MoogleRoleNames, MoogleRoleNames.Length))
+        { cfg.MoogleGroupRole = role; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Solo: just farm.\nLeader: queues each duty, and holds the queue while any member is repairing.\nMember: never queues — watches runs, repairs when needed, and broadcasts the hold.");
+
+        if (role != Configuration.MoogleRoleSolo)
+        {
+            if (IpcManager.DaedalusRelayAvailable)
+                UiTheme.Chip(FontAwesomeIcon.Check, "Daedalus LAN relay connected", UiTheme.Teal);
+            else
+                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Daedalus LAN relay not detected", UiTheme.Yellow);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Repair holds travel over Daedalus's LAN coordinator (Party Coordination settings).\nEnable it on every machine, same port, and reload Daedalus after enabling.");
+        }
+
+        ImGui.Spacing();
+
+        if (role == Configuration.MoogleRoleMember)
+        {
+            ImGui.TextColored(UiTheme.Gray, "This client repairs and reports — the leader picks and queues the duty.");
+        }
+        else
+        {
+            var duties = AutoDutyCatalog.DutiesWithTrials.ToList();
+            var selected = duties.FirstOrDefault(d =>
+                    d.ContentFinderConditionId != 0 && d.ContentFinderConditionId == cfg.MoogleDutyCfcId)
+                ?? duties.FirstOrDefault(d => d.TerritoryType == cfg.MoogleDutyTerritory);
+            EnsureAdPathCache(duties);
+
+            var filtered = DrawExpansionFilter(
+                "moogle", duties, selected?.Expansion ?? 0,
+                d => d.Expansion, d => d.ExpansionName, ref _moogleExpansionFilter);
+
+            if (_adPathCache != null)
+            {
+                var withPath = filtered.Where(d => AutoDutyHasPathCached(d.TerritoryType)).ToList();
+                var hidden = filtered.Count - withPath.Count;
+                if (withPath.Count > 0)
+                    filtered = withPath;
+                if (hidden > 0)
+                    ImGui.TextColored(UiTheme.Gray, $"{hidden} dut(ies) hidden — AutoDuty has no path for them.");
+            }
+
+            var selectedIndex = selected == null
+                ? -1
+                : filtered.FindIndex(d =>
+                    d.ContentFinderConditionId == selected.ContentFinderConditionId
+                    && d.TerritoryType == selected.TerritoryType);
+            var labels = filtered
+                .Select(d => AutoDutyCatalog.FormatLabel(d)
+                    + (d.ContentTypeId == AutoDutyCatalog.ContentTypeTrial ? " [Trial]" : ""))
+                .ToArray();
+            var picked = DrawDungeonCombo("Duty", labels, selectedIndex,
+                i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId, true));
+            if (picked >= 0)
+            {
+                cfg.MoogleDutyCfcId = filtered[picked].ContentFinderConditionId;
+                cfg.MoogleDutyTerritory = filtered[picked].TerritoryType;
+                cfg.MoogleDutyName = filtered[picked].Name;
+                cfg.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Queued SYNCED through the normal Duty Finder (AutoDuty Regular mode).\nTrials are included; duties without an AutoDuty path are hidden.");
+
+            if (selected != null)
+                DrawDutyRequirementCheck(selected.RequiredLevel, selected.RequiredItemLevel, selected.InstanceContentId);
+        }
+
+        ImGui.Spacing();
+        UiTheme.GoldFadeRule();
+        ImGui.TextColored(UiTheme.Accent, "Moogle tomestones");
+
+        var ctrl = Plugin.Controller;
+        if (DateTime.Now - _moogleTomeCacheAt > TimeSpan.FromSeconds(2))
+        {
+            _moogleTomeCacheAt = DateTime.Now;
+            _moogleTomeCache = ctrl.MoogleTomeStats();
+        }
+
+        if (_moogleTomeCache is not { Count: > 0 })
+        {
+            ImGui.TextDisabled("None held yet.");
+        }
+        else
+        {
+            foreach (var s in _moogleTomeCache)
+            {
+                var label = s.Name.Replace("Irregular Tomestone of ", "", StringComparison.OrdinalIgnoreCase)
+                                  .Replace("Irregular Tomestone ", "", StringComparison.OrdinalIgnoreCase);
+                var line = $"{label} — held {s.Held:N0}";
+                if (s.GainedSession > 0)
+                    line += $"  (+{s.GainedSession:N0} this session)";
+                ImGui.TextColored(s.GainedSession > 0 ? UiTheme.Green : UiTheme.Gray, line);
+            }
+        }
+
+        if (ctrl.IsRunning && cfg.FarmMode == Configuration.FarmModeMoogle)
+            ImGui.TextColored(UiTheme.Teal, $"Session: {ctrl.MoogleSessionTomeGain():N0} gained · {ctrl.MoogleTomesPerHour():F0}/hour");
+    }
+
+    private static List<CharonJobTrack>? _levelingTracksCache;
+    private static CharonLevelingStatus? _levelingStatusCache;
+    private static DateTime _levelingCacheAt = DateTime.MinValue;
+
+    /// <summary>IPC polls are throttled to every 3s — the pane redraws each frame.</summary>
+    private static void RefreshLevelingCache()
+    {
+        if (DateTime.Now - _levelingCacheAt < TimeSpan.FromSeconds(3))
+            return;
+
+        _levelingCacheAt = DateTime.Now;
+        if (!IpcManager.CharonLevelingAvailable)
+        {
+            _levelingTracksCache = null;
+            _levelingStatusCache = null;
+            return;
+        }
+
+        _levelingTracksCache = CharonLevelingClient.ParseTracks(IpcManager.CharonLevelingJobLevelsJson());
+        _levelingStatusCache = CharonLevelingClient.ParseStatus(IpcManager.CharonLevelingStatusJson());
+    }
+
+    private void DrawLevelingFarmSettings(Configuration cfg)
+    {
+        ImGui.TextColored(UiTheme.Teal, "Round-robin: each cycle runs the normal GC loop, then switches to your\nlowest-level job via Charon — until every eligible job reaches the gate target.");
+
+        if (!IpcManager.CharonLevelingAvailable)
+        {
+            UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Charon leveling IPC not detected", UiTheme.Yellow);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Install/update Charon and make sure Leveling IPC is enabled in its settings.");
+            return;
+        }
+
+        RefreshLevelingCache();
+        var status = _levelingStatusCache;
+        var tracks = _levelingTracksCache;
+        var levelCap = status?.LevelCap ?? 0;
+
+        // Gate options: the plan's boundaries the account can actually reach, plus the cap itself.
+        var options = CharonLevelingClient.GateBoundaries
+            .Where(b => levelCap <= 0 || b <= levelCap)
+            .ToList();
+        if (levelCap > 0 && !options.Contains(levelCap))
+            options.Add(levelCap);
+
+        string LabelOf(int v) => v == levelCap ? $"Account cap ({v})" : $"All jobs to {v}";
+
+        var effective = CharonLevelingClient.EffectiveGateTarget(cfg.LevelingGateTarget, levelCap);
+        var preview = options.Contains(cfg.LevelingGateTarget)
+            ? LabelOf(cfg.LevelingGateTarget)
+            : $"All jobs to {cfg.LevelingGateTarget} (clamped to {effective})";
+
+        ImGui.SetNextItemWidth(200);
+        if (ImGui.BeginCombo("Gate target", preview))
+        {
+            foreach (var v in options)
+            {
+                if (ImGui.Selectable(LabelOf(v), v == cfg.LevelingGateTarget))
+                { cfg.LevelingGateTarget = v; cfg.Save(); }
+            }
+            ImGui.EndCombo();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Raise every eligible job to this level, then stop. Options come from the\naccount's live level cap via Charon, so a free trial only sees reachable targets.");
+
+        if (status != null)
+            ImGui.TextColored(UiTheme.Gray, $"Account level cap: {status.LevelCap}{(status.FreeTrial ? " (free trial)" : "")}  ·  Charon: {status.Busy}");
+
+        if (tracks is { Count: > 0 })
+        {
+            ImGui.Spacing();
+            ImGui.TextDisabled("Rotation (lowest level first) — the farm picks the top \"in rotation\" row:");
+            if (ImGui.BeginTable("##levelingJobs", 3, ImGuiTableFlags.SizingFixedFit))
+            {
+                foreach (var t in tracks.OrderBy(t => t.Level).ThenBy(t => t.Abbr, StringComparer.OrdinalIgnoreCase))
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(t.Abbr);
+
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(t.Level >= effective ? UiTheme.Green : UiTheme.Accent, $"Lv {t.Level}");
+
+                    ImGui.TableNextColumn();
+                    string note;
+                    Vector4 noteCol;
+                    if (!t.Unlocked)
+                    { note = t.BlockerText.Length > 0 ? t.BlockerText : "not unlocked"; noteCol = UiTheme.Gray; }
+                    else if (t.Level >= effective)
+                    { note = "target reached"; noteCol = UiTheme.Green; }
+                    else if (t.Blocker.Length > 0)
+                    { note = t.BlockerText.Length > 0 ? t.BlockerText : t.Blocker; noteCol = t.Hard ? UiTheme.Gray : UiTheme.Yellow; }
+                    else
+                    { note = "in rotation"; noteCol = UiTheme.Teal; }
+                    ImGui.TextColored(noteCol, note);
+                }
+                ImGui.EndTable();
+            }
+        }
+
+        ImGui.Spacing();
+        ImGui.TextColored(UiTheme.Gray, "Level 30 class quests are manual — run the quest and the job rejoins the rotation.");
+        ImGui.TextColored(UiTheme.Gray, "Bridge gear at expansion boundaries is manual for now; the farm keeps running the older dungeon.");
     }
 
     private static void DrawTomestoneStopCondition(Configuration cfg)

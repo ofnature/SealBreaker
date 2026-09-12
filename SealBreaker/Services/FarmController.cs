@@ -187,6 +187,8 @@ public sealed class FarmController : IDisposable
         OpenDutySupport, QueueDutySupport,
         CheckGcLoop, CycleComplete, Error,
         CheckTomeSpend, SpendRelicTomes,
+        LevelingRotation,
+        MoogleHoldWait, MoogleMemberWait,
     }
 
     public FarmState State         { get; private set; } = FarmState.Idle;
@@ -323,12 +325,14 @@ public sealed class FarmController : IDisposable
     {
         Service.Framework.Update += OnFrameworkUpdate;
         _addonLifecycle.Register(AddonEvent.PostSetup, "GrandCompanySupplyList", OnSupplyListPostSetup);
+        IpcManager.DaedalusRelaySubscribe(OnDaedalusRelayMessage);
     }
 
     public void Dispose()
     {
         Service.Framework.Update -= OnFrameworkUpdate;
         _addonLifecycle.Dispose();
+        IpcManager.DaedalusRelayUnsubscribe();
         IpcManager.VnavStop();
     }
 
@@ -380,6 +384,29 @@ public sealed class FarmController : IDisposable
             }
         }
 
+        if (Plugin.Config.FarmMode == Configuration.FarmModeLeveling
+            && !IpcManager.CharonLevelingAvailable)
+        {
+            Log("Cannot start — leveling mode needs Charon with its Leveling IPC enabled.");
+            return;
+        }
+
+        if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
+        {
+            if (Plugin.Config.MoogleGroupRole != Configuration.MoogleRoleMember
+                && Plugin.Config.DutyRunner != 0)
+            {
+                Log("Cannot start — the moogle farm queues through AutoDuty (switch Duty runner on the Duty page).");
+                return;
+            }
+
+            if (Plugin.Config.MoogleGroupRole != Configuration.MoogleRoleSolo
+                && !IpcManager.DaedalusRelayAvailable)
+            {
+                Log("WARN: Daedalus LAN relay not available — repair holds will not reach the group.");
+            }
+        }
+
         IsRunning = true; TotalCycles = 0; TotalRuns = 0; TotalSeals = 0;
         TotalDuckbones = 0; StartTime = DateTime.Now; _runsThisCycle = 0; _cycleCounted = false; LastError = null;
         StopAfterRunRequested = false;
@@ -390,6 +417,12 @@ public sealed class FarmController : IDisposable
         _automationOwnsGcPersonnelUi = false;
         _repairTestMode = false; _deliveryTestMode = false; _shopTestMode = false; _extractTestMode = false;
         _relicSpendTestMode = false;
+        _levelingRotationDoneThisCycle = false; _levelingSwitchFailed.Clear(); _levelingSwitchRejects = 0;
+        _memberWasInDuty = false; _memberHoldActive = false; _memberExitSettleAt = null;
+        lock (_repairHolds) _repairHolds.Clear();
+        _tomeRunSnapshot.Clear();
+        if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
+            CaptureTomeBaseline();
         _oneShotBuyEntry = null;
         _oneShotBuyAttemptSent = false;
         _adsRepairAttemptedBeforeDuty = false;
@@ -639,6 +672,7 @@ public sealed class FarmController : IDisposable
 
     public void Stop()
     {
+        SetMemberHold(false); // broadcast the clear before anything else winds down
         IsRunning = false;
         StopAfterRunRequested = false;
         _repairTestMode = false;
@@ -678,6 +712,7 @@ public sealed class FarmController : IDisposable
         TryDismissStuckOfficerMenuTick();
 
         if (!IsRunning) return;
+        MoogleHoldBroadcastTick();
         if (_currentTask is { IsCompleted: false }) return;
         if (_currentTask is { IsFaulted: true })
         {
@@ -710,6 +745,14 @@ public sealed class FarmController : IDisposable
         {
             case FarmState.CheckSealSpend:
             {
+                if (cfg.FarmMode == Configuration.FarmModeMoogle)
+                {
+                    GotoState(cfg.MoogleGroupRole == Configuration.MoogleRoleMember
+                        ? FarmState.MoogleMemberWait
+                        : FarmState.StartDuty);
+                    break;
+                }
+
                 var seals = GetCurrentSeals();
                 Log($"Seal check — current: {seals:N0}, duckbone cost: {GcShopDefaults.DuckboneSealCost + Plugin.Config.SealReserve:N0}");
 
@@ -729,6 +772,14 @@ public sealed class FarmController : IDisposable
 
             case FarmState.StartDuty:
             {
+                // Moogle members never queue — repair flows end at StartDuty, so bounce back.
+                if (cfg.FarmMode == Configuration.FarmModeMoogle
+                    && cfg.MoogleGroupRole == Configuration.MoogleRoleMember)
+                {
+                    GotoState(FarmState.MoogleMemberWait);
+                    break;
+                }
+
                 if (StopAfterRunRequested)
                 {
                     Log("Stop-after-run: stopping before the next duty.");
@@ -747,6 +798,28 @@ public sealed class FarmController : IDisposable
                 {
                     Log($"{TomestoneCapLabel(cfg)} — stopping.");
                     Stop();
+                    break;
+                }
+
+                // Leveling mode: once per cycle boundary, re-read Charon's job levels, switch to
+                // the lowest eligible job (or stop with the summary when nothing is selectable).
+                if (cfg.FarmMode == Configuration.FarmModeLeveling
+                    && !IsMidDutyCycle(cfg)
+                    && !_levelingRotationDoneThisCycle)
+                {
+                    _currentTask = EvaluateLevelingRotationAsync();
+                    GotoState(FarmState.LevelingRotation);
+                    break;
+                }
+
+                // Moogle leader: don't queue while a trusted member is broadcasting a repair hold.
+                if (cfg.FarmMode == Configuration.FarmModeMoogle
+                    && cfg.MoogleGroupRole == Configuration.MoogleRoleLeader
+                    && !IsMidDutyCycle(cfg)
+                    && FreshRepairHolds().Count > 0)
+                {
+                    _moogleHoldWaitStart = DateTime.Now;
+                    GotoState(FarmState.MoogleHoldWait);
                     break;
                 }
 
@@ -801,6 +874,9 @@ public sealed class FarmController : IDisposable
                     }
 
                     _cycleCounted = false;
+                    _levelingRotationDoneThisCycle = false;
+                    if (cfg.FarmMode == Configuration.FarmModeMoogle)
+                        CaptureTomeRunSnapshot();
                     _currentRunStart = DateTime.Now;
                     _adsRepairAttemptedBeforeDuty = false;
                     _adsLeaveRequestedForFinalRun = false;
@@ -914,9 +990,19 @@ public sealed class FarmController : IDisposable
                 {
                     _dutyExitReadyAt = null;
 
+                    // Moogle farm: no GC leg — tally the run's tomestones and go straight to
+                    // the next queue (repair/hold checks run at StartDuty).
+                    if (cfg.FarmMode == Configuration.FarmModeMoogle)
+                    {
+                        LogMoogleRunGain();
+                        GotoState(FarmState.StartDuty);
+                        break;
+                    }
+
                     // Leveling mode: equip upgrades BEFORE Expert Delivery so fresh drops get
                     // worn instead of turned in for seals.
-                    if (cfg.LevelingMode && cfg.AutoEquipUpgrades && !_gearEquipDoneThisCycle)
+                    if ((cfg.LevelingMode || cfg.FarmMode == Configuration.FarmModeLeveling)
+                        && cfg.AutoEquipUpgrades && !_gearEquipDoneThisCycle)
                     {
                         _gearEquipDoneThisCycle = true;
                         _currentTask = RunGearEquipThenDeliveryAsync();
@@ -1180,6 +1266,103 @@ public sealed class FarmController : IDisposable
             case FarmState.SpendRelicTomes:
                 // Driven by TravelAndSpendRelicTomesAsync via _currentTask.
                 break;
+
+            case FarmState.LevelingRotation:
+                // Driven by EvaluateLevelingRotationAsync via _currentTask.
+                break;
+
+            case FarmState.MoogleHoldWait:
+            {
+                var holds = FreshRepairHolds();
+                if (holds.Count == 0)
+                {
+                    Log("Repair holds clear — queueing the next duty");
+                    GotoState(FarmState.StartDuty);
+                    break;
+                }
+
+                var maxWait = TimeSpan.FromSeconds(Math.Max(30, cfg.MoogleHoldMaxWaitSeconds));
+                if (DateTime.Now - _moogleHoldWaitStart > maxWait)
+                {
+                    Log($"WARN: repair hold from {string.Join(", ", holds)} exceeded {(int)maxWait.TotalSeconds}s — queueing anyway");
+                    lock (_repairHolds)
+                        _repairHolds.Clear();
+                    GotoState(FarmState.StartDuty);
+                    break;
+                }
+
+                StatusQuiet($"Holding next duty — repairing: {string.Join(", ", holds)}");
+                break;
+            }
+
+            case FarmState.MoogleMemberWait:
+            {
+                if (InDuty())
+                {
+                    if (!_memberWasInDuty)
+                    {
+                        _memberWasInDuty = true;
+                        _memberExitSettleAt = null;
+                        _currentRunStart = DateTime.Now;
+                        CaptureTomeRunSnapshot();
+                        Status($"In duty (member) — run {TotalRuns + 1}");
+                    }
+                    break;
+                }
+
+                if (_memberWasInDuty)
+                {
+                    // Wait until fully zoned out and settled before acting on the run's end.
+                    if (!CanRunWorldAutomation())
+                    {
+                        _memberExitSettleAt = null;
+                        StatusQuiet("Leaving duty...");
+                        break;
+                    }
+
+                    _memberExitSettleAt ??= DateTime.Now;
+                    if (DateTime.Now - _memberExitSettleAt.Value < TimeSpan.FromSeconds(2))
+                        break;
+
+                    _memberWasInDuty = false;
+                    _memberExitSettleAt = null;
+                    TotalRuns++;
+                    LogMoogleRunGain();
+
+                    if (StopAfterRunRequested)
+                    {
+                        Log($"Run complete — stopping as requested (total runs this session: {TotalRuns}).");
+                        Stop();
+                        break;
+                    }
+
+                    if (cfg.TotalRunLimit > 0 && TotalRuns >= cfg.TotalRunLimit)
+                    {
+                        Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — stopping.");
+                        Stop();
+                        break;
+                    }
+
+                    // Gear check: broadcast the hold, then ride the normal repair flow — it ends
+                    // at StartDuty, which bounces members back here (and that return clears the hold).
+                    if (ShouldRepairBetweenRuns())
+                    {
+                        SetMemberHold(true);
+                        if (TryBeginRepairBeforeDuty())
+                            break;
+
+                        SetMemberHold(false); // repair refused to start — don't wedge the leader
+                    }
+
+                    break;
+                }
+
+                if (_memberHoldActive && CanRunWorldAutomation())
+                    SetMemberHold(false);
+
+                StatusQuiet("Waiting for the leader's duty queue...");
+                break;
+            }
 
             case FarmState.Idle:
             case FarmState.Error:
@@ -2908,7 +3091,9 @@ public sealed class FarmController : IDisposable
             or FarmState.CheckSubZone or FarmState.WaitingForSubZone
             // Relic spend trip: Lifestream drives the Tuliyollal aetheryte's SelectString for the
             // Phantom Village aethernet hop — dismissing it clicks "Register Free Destination".
-            or FarmState.SpendRelicTomes or FarmState.CheckTomeSpend)
+            or FarmState.SpendRelicTomes or FarmState.CheckTomeSpend
+            // Moogle farm wait states: duty pop/queue dialogs must never be auto-dismissed.
+            or FarmState.MoogleHoldWait or FarmState.MoogleMemberWait)
             return;
 
         if (!_deliveryFinishing && !IsGcOfficerMenuOpen())
@@ -3453,7 +3638,9 @@ public sealed class FarmController : IDisposable
     {
         if (Plugin.Config.FarmMode == Configuration.FarmModeTomestoneRelic)
             ApplyRelicModeDutyPick(Plugin.Config);
-        else if (Plugin.Config.LevelingMode)
+        else if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
+            ApplyMoogleModeDutyPick(Plugin.Config);
+        else if (Plugin.Config.LevelingMode || Plugin.Config.FarmMode == Configuration.FarmModeLeveling)
             await Service.Framework.RunOnFrameworkThread(() => ApplyLevelingModeDutyPick(Plugin.Config));
 
         var runner = Plugin.Config.DutyRunner;
@@ -3485,9 +3672,17 @@ public sealed class FarmController : IDisposable
                 return false;
             }
 
-            var modeValue = Plugin.Config.AutoDutyModeConfigValue();
+            // Moogle farm queues a normal SYNCED Duty Finder run (Regular) — members' Charon
+            // auto-commences the pop. Force Unsynced off so a stale AutoDuty setting can't leak in.
+            var modeValue = Plugin.Config.FarmMode == Configuration.FarmModeMoogle
+                ? "Regular"
+                : Plugin.Config.AutoDutyModeConfigValue();
             if (modeValue != null && !IpcManager.AutoDutySetConfig("dutyModeEnum", modeValue))
                 await LogAsync($"WARN: Could not set AutoDuty duty mode to {modeValue} — using AutoDuty's current setting");
+
+            if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle
+                && !IpcManager.AutoDutySetConfig("Unsynced", "false"))
+                await LogAsync("WARN: Could not force AutoDuty to synced queueing — check AutoDuty's Unsynced setting");
 
             if (!IpcManager.AutoDutyRun(autoDutyDuty.TerritoryType, 1))
             {
@@ -6383,6 +6578,396 @@ public sealed class FarmController : IDisposable
             Service.PluginLog.Error(ex, "[SealBreaker] Relic tome spend failed");
             await SetErrorAsync($"Relic tome spend failed: {ex.Message}");
         }
+    }
+
+    // ── Leveling farm mode (job round-robin via Charon.Leveling.*) ───────
+
+    private bool _levelingRotationDoneThisCycle;
+    private int _levelingSwitchRejects;
+    private readonly HashSet<uint> _levelingSwitchFailed = [];
+
+    /// <summary>Once per cycle boundary: read Charon's job levels, pick the lowest-level unlocked
+    /// job with no blocker under the gate target, switch to it, and resume the loop — or stop with
+    /// the levelled/not-levelled summary when nothing is selectable.</summary>
+    private async Task EvaluateLevelingRotationAsync()
+    {
+        try
+        {
+            var cfg = Plugin.Config;
+            var (tracksJson, statusJson) = await Service.Framework.RunOnFrameworkThread(() =>
+                (IpcManager.CharonLevelingJobLevelsJson(), IpcManager.CharonLevelingStatusJson()));
+
+            var tracks = CharonLevelingClient.ParseTracks(tracksJson);
+            if (tracks == null || tracks.Count == 0)
+            {
+                await SetErrorAsync("Charon's leveling IPC returned no jobs — enable Leveling IPC in Charon's settings");
+                return;
+            }
+
+            var status = CharonLevelingClient.ParseStatus(statusJson);
+            var target = CharonLevelingClient.EffectiveGateTarget(cfg.LevelingGateTarget, status?.LevelCap ?? 0);
+
+            var pick = CharonLevelingClient.PickNextJob(tracks, target, _levelingSwitchFailed);
+            if (pick == null)
+            {
+                await LogAsync($"Leveling run complete — nothing selectable below level {target}.");
+                foreach (var line in CharonLevelingClient.BuildSummary(tracks, target))
+                    await LogAsync(line);
+                foreach (var row in _levelingSwitchFailed)
+                {
+                    var failed = tracks.FirstOrDefault(t => t.Row == row);
+                    await LogAsync($"  {failed?.Abbr ?? row.ToString()} — job switch failed this session; check its gearset");
+                }
+                Stop();
+                return;
+            }
+
+            _levelingRotationDoneThisCycle = true;
+
+            var currentJob = await Service.Framework.RunOnFrameworkThread(() =>
+                Service.ObjectTable.LocalPlayer?.ClassJob.RowId ?? 0u);
+
+            if (currentJob != pick.Row)
+            {
+                await StatusAsync($"Switching to {pick.Abbr} (Lv {pick.Level})...");
+                var accepted = await Service.Framework.RunOnFrameworkThread(() =>
+                    IpcManager.CharonLevelingSwitchJob(pick.Row));
+                if (!accepted)
+                {
+                    // Charon busy or refused. Retry a few times, then error rather than spin.
+                    _levelingRotationDoneThisCycle = false;
+                    if (++_levelingSwitchRejects >= 5)
+                    {
+                        await SetErrorAsync($"Charon kept refusing the {pick.Abbr} job switch — check Charon's Debug status");
+                        return;
+                    }
+
+                    await LogAsync($"WARN: Charon did not accept the {pick.Abbr} job switch (busy?) — retrying");
+                    await Task.Delay(1500);
+                    await GotoStateAsync(FarmState.StartDuty);
+                    return;
+                }
+
+                _levelingSwitchRejects = 0;
+
+                // Completion = the player's actual job changing, not the accept flag.
+                var deadline = DateTime.UtcNow.AddSeconds(8);
+                var switched = false;
+                while (DateTime.UtcNow < deadline && IsRunning)
+                {
+                    if (await Service.Framework.RunOnFrameworkThread(() =>
+                            Service.ObjectTable.LocalPlayer?.ClassJob.RowId ?? 0u) == pick.Row)
+                    {
+                        switched = true;
+                        break;
+                    }
+
+                    await Task.Delay(250);
+                }
+
+                if (!IsRunning)
+                    return;
+
+                if (!switched)
+                {
+                    _levelingSwitchFailed.Add(pick.Row);
+                    _levelingRotationDoneThisCycle = false;
+                    await LogAsync($"WARN: switch to {pick.Abbr} did not land — skipping it this session (check its gearset)");
+                    await GotoStateAsync(FarmState.StartDuty); // re-evaluate, next job
+                    return;
+                }
+
+                await LogAsync($"Leveling {pick.Abbr}: Lv {pick.Level} → target {target}");
+
+                // The new job's best gear may be sitting in the bags — equip before queueing.
+                if (cfg.AutoEquipUpgrades)
+                {
+                    try { await RunGearEquipCoreAsync(); }
+                    catch (Exception ex) { await LogAsync($"WARN: post-switch gear equip failed ({ex.Message}) — continuing"); }
+                }
+            }
+            else
+            {
+                _levelingSwitchRejects = 0;
+                await LogAsync($"Leveling {pick.Abbr}: Lv {pick.Level} → target {target}");
+            }
+
+            if (!IsRunning)
+                return;
+
+            await GotoStateAsync(FarmState.StartDuty);
+        }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Error(ex, "[SealBreaker] Leveling rotation failed");
+            await SetErrorAsync($"Leveling rotation failed: {ex.Message}");
+        }
+    }
+
+    // ── Moogle tomestone farm (irregular tomestones, group repair holds) ─────
+
+    private readonly Dictionary<string, (DateTime LastSeen, string Reason)> _repairHolds = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _moogleHoldWaitStart;
+    private bool _memberWasInDuty;
+    private DateTime? _memberExitSettleAt;
+    private bool _memberHoldActive;
+    private DateTime _memberHoldLastSent = DateTime.MinValue;
+
+    /// <summary>Relay frames arrive on the framework thread. Holds are accepted only from toons
+    /// on Daedalus's trust list (when one is available) and expire by freshness — see RepairHoldRelay.</summary>
+    private void OnDaedalusRelayMessage(string channel, string json)
+    {
+        if (!string.Equals(channel, RepairHoldRelay.Channel, StringComparison.Ordinal))
+            return;
+
+        var msg = RepairHoldRelay.TryParse(json);
+        if (msg == null)
+            return;
+
+        if (msg.Act == RepairHoldRelay.ActHold)
+        {
+            if (!IsTrustedLanToon(msg.Name))
+                return;
+
+            lock (_repairHolds)
+            {
+                var isNew = !_repairHolds.ContainsKey(msg.Name);
+                _repairHolds[msg.Name] = (DateTime.UtcNow, msg.Reason);
+                if (isNew)
+                    Log($"Repair hold from {msg.Name}{(msg.Reason.Length > 0 ? $" ({msg.Reason})" : "")}");
+            }
+        }
+        else if (msg.Act == RepairHoldRelay.ActClear)
+        {
+            lock (_repairHolds)
+            {
+                if (_repairHolds.Remove(msg.Name))
+                    Log($"Repair hold cleared by {msg.Name}");
+            }
+        }
+    }
+
+    private static List<string>? _lanTrustCache;
+    private static DateTime _lanTrustCacheAt = DateTime.MinValue;
+
+    private static bool IsTrustedLanToon(string name)
+    {
+        if (DateTime.UtcNow - _lanTrustCacheAt > TimeSpan.FromSeconds(10))
+        {
+            _lanTrustCacheAt = DateTime.UtcNow;
+            _lanTrustCache = ParseTrustList(IpcManager.DaedalusTrustListJson());
+        }
+
+        // No usable list (Daedalus absent / LAN off) → the LAN is the user's own fleet; accept.
+        return _lanTrustCache is not { Count: > 0 }
+            || _lanTrustCache.Contains(name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static List<string>? ParseTrustList(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array)
+                return null;
+
+            var names = new List<string>();
+            foreach (var e in doc.RootElement.EnumerateArray())
+            {
+                if (e.ValueKind == System.Text.Json.JsonValueKind.String && e.GetString() is { Length: > 0 } n)
+                    names.Add(n);
+            }
+
+            return names;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Prunes stale holds and returns who is still actively holding.</summary>
+    private List<string> FreshRepairHolds()
+    {
+        lock (_repairHolds)
+        {
+            var stale = _repairHolds
+                .Where(kv => DateTime.UtcNow - kv.Value.LastSeen > RepairHoldRelay.HoldFreshness)
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var name in stale)
+            {
+                _repairHolds.Remove(name);
+                Log($"Repair hold from {name} went stale — dropped");
+            }
+
+            return _repairHolds.Keys.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+    }
+
+    /// <summary>Member side: re-broadcast the active hold every couple of seconds (framework tick).</summary>
+    private void MoogleHoldBroadcastTick()
+    {
+        if (!_memberHoldActive)
+            return;
+
+        if (DateTime.UtcNow - _memberHoldLastSent < RepairHoldRelay.RebroadcastEvery)
+            return;
+
+        _memberHoldLastSent = DateTime.UtcNow;
+        var name = Service.ObjectTable.LocalPlayer?.Name.TextValue ?? "";
+        if (name.Length == 0)
+            return;
+
+        IpcManager.DaedalusRelayPublish(RepairHoldRelay.Channel,
+            RepairHoldRelay.Encode(RepairHoldRelay.ActHold, name, "repairing"));
+    }
+
+    private void SetMemberHold(bool active)
+    {
+        if (_memberHoldActive == active)
+            return;
+
+        _memberHoldActive = active;
+        if (active)
+        {
+            _memberHoldLastSent = DateTime.MinValue; // broadcast on the very next tick
+            Log("Broadcasting repair hold to the group");
+            return;
+        }
+
+        var name = Service.ObjectTable.LocalPlayer?.Name.TextValue ?? "";
+        if (name.Length > 0
+            && IpcManager.DaedalusRelayPublish(RepairHoldRelay.Channel,
+                RepairHoldRelay.Encode(RepairHoldRelay.ActClear, name, "")))
+            Log("Repair done — hold cleared for the group");
+    }
+
+    // ── Irregular tomestone tracking ──
+
+    private static List<(uint Id, string Name)>? _irregularTomestoneItems;
+
+    /// <summary>Every "Irregular Tomestone" item from the sheet — resolved by name so the next
+    /// Moogle Treasure Trove's tomestone tracks without a code change.</summary>
+    internal static IReadOnlyList<(uint Id, string Name)> IrregularTomestoneItems()
+    {
+        if (_irregularTomestoneItems != null)
+            return _irregularTomestoneItems;
+
+        var list = new List<(uint, string)>();
+        try
+        {
+            foreach (var row in Service.DataManager.GetExcelSheet<Item>())
+            {
+                var n = row.Name.ExtractText();
+                if (n.StartsWith("Irregular Tomestone", StringComparison.OrdinalIgnoreCase))
+                    list.Add((row.RowId, n));
+            }
+        }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "[SealBreaker] Failed to scan irregular tomestone items");
+        }
+
+        _irregularTomestoneItems = list;
+        return list;
+    }
+
+    private readonly Dictionary<uint, int> _tomeBaseline = new();
+    private readonly Dictionary<uint, int> _tomeRunSnapshot = new();
+
+    private void CaptureTomeBaseline()
+    {
+        _tomeBaseline.Clear();
+        foreach (var (id, _) in IrregularTomestoneItems())
+            _tomeBaseline[id] = GetInventoryItemCount(id);
+    }
+
+    private void CaptureTomeRunSnapshot()
+    {
+        _tomeRunSnapshot.Clear();
+        foreach (var (id, _) in IrregularTomestoneItems())
+            _tomeRunSnapshot[id] = GetInventoryItemCount(id);
+    }
+
+    internal sealed record MoogleTomeStat(uint ItemId, string Name, int Held, int GainedSession);
+
+    /// <summary>Irregular tomestones worth showing: any the character holds, or gained this session.</summary>
+    internal List<MoogleTomeStat> MoogleTomeStats()
+    {
+        var stats = new List<MoogleTomeStat>();
+        foreach (var (id, name) in IrregularTomestoneItems())
+        {
+            var held = GetInventoryItemCount(id);
+            var gained = IsRunning && _tomeBaseline.TryGetValue(id, out var baseline)
+                ? Math.Max(0, held - baseline)
+                : 0;
+            if (held > 0 || gained > 0)
+                stats.Add(new MoogleTomeStat(id, name, held, gained));
+        }
+
+        return stats;
+    }
+
+    public int MoogleSessionTomeGain()
+    {
+        var total = 0;
+        foreach (var (id, _) in IrregularTomestoneItems())
+        {
+            if (_tomeBaseline.TryGetValue(id, out var baseline))
+                total += Math.Max(0, GetInventoryItemCount(id) - baseline);
+        }
+
+        return total;
+    }
+
+    public double MoogleTomesPerHour()
+    {
+        if (!IsRunning)
+            return 0;
+
+        var hours = (DateTime.Now - StartTime).TotalHours;
+        return hours > 0.005 ? MoogleSessionTomeGain() / hours : 0;
+    }
+
+    private void LogMoogleRunGain()
+    {
+        if (_tomeRunSnapshot.Count == 0)
+            return;
+
+        var gained = 0;
+        foreach (var (id, _) in IrregularTomestoneItems())
+        {
+            if (_tomeRunSnapshot.TryGetValue(id, out var before))
+                gained += Math.Max(0, GetInventoryItemCount(id) - before);
+        }
+
+        _tomeRunSnapshot.Clear();
+        Log($"Run gained {gained} irregular tomestone(s) — session {MoogleSessionTomeGain()}, {MoogleTomesPerHour():F0}/hr");
+    }
+
+    /// <summary>Moogle mode: force the AutoDuty selection to the configured moogle duty (trials included).</summary>
+    private void ApplyMoogleModeDutyPick(Configuration cfg)
+    {
+        AutoDutyCatalog.EnsureInitialized();
+        var duty = AutoDutyCatalog.DutiesWithTrials.FirstOrDefault(d =>
+                d.ContentFinderConditionId != 0 && d.ContentFinderConditionId == cfg.MoogleDutyCfcId)
+            ?? AutoDutyCatalog.DutiesWithTrials.FirstOrDefault(d => d.TerritoryType == cfg.MoogleDutyTerritory);
+        if (duty == null)
+        {
+            Log($"WARN: moogle duty (cfc {cfg.MoogleDutyCfcId}) not found in the catalog — keeping the current duty selection");
+            return;
+        }
+
+        if (duty.TerritoryType == cfg.AutoDutyTerritoryType
+            && duty.ContentFinderConditionId == cfg.AutoDutyContentFinderConditionId)
+            return;
+
+        AutoDutyCatalog.ApplySelection(cfg, duty);
+        Log($"Moogle farm: duty set to {duty.Name}");
     }
 
     public static int GetDuckBoneInventoryCount() =>

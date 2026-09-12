@@ -547,6 +547,191 @@ internal static class IpcManager
         catch { return -1; }
     }
 
+    // ── Charon leveling gates (Charon.Leveling.*, contract in .claude/leveling-mode-plan.md) ──
+    //   Charon.Leveling.GetJobLevelsJson  Func<string>       — one entry per combat exp track w/ blocker
+    //   Charon.Leveling.GetStatusJson     Func<string>       — busy/freeTrial/levelCap account facts
+    //   Charon.Leveling.SwitchJob         Func<uint, bool>   — true = accepted; verify via ClassJob readback
+    //   Disabled in Charon's config → the JSON gates return "[]" / "{}".
+
+    private static ICallGateSubscriber<string>? _charonLevelingJobLevels;
+    private static ICallGateSubscriber<string>? _charonLevelingStatus;
+    private static ICallGateSubscriber<uint, bool>? _charonLevelingSwitchJob;
+
+    public static bool CharonLevelingAvailable
+    {
+        get
+        {
+            if (!CharonPluginLoaded)
+                return false;
+
+            RefreshCharonLevelingSubscribers();
+            return (_charonLevelingJobLevels?.HasFunction ?? false)
+                && (_charonLevelingSwitchJob?.HasFunction ?? false);
+        }
+    }
+
+    private static void RefreshCharonLevelingSubscribers()
+    {
+        if (_charonLevelingJobLevels is { HasFunction: false })
+            _charonLevelingJobLevels = null;
+        if (_charonLevelingStatus is { HasFunction: false })
+            _charonLevelingStatus = null;
+        if (_charonLevelingSwitchJob is { HasFunction: false })
+            _charonLevelingSwitchJob = null;
+
+        try
+        {
+            _charonLevelingJobLevels ??= Service.PluginInterface.GetIpcSubscriber<string>("Charon.Leveling.GetJobLevelsJson");
+            _charonLevelingStatus ??= Service.PluginInterface.GetIpcSubscriber<string>("Charon.Leveling.GetStatusJson");
+            _charonLevelingSwitchJob ??= Service.PluginInterface.GetIpcSubscriber<uint, bool>("Charon.Leveling.SwitchJob");
+        }
+        catch
+        {
+            // Availability is checked via HasFunction per call.
+        }
+    }
+
+    /// <summary>Raw track-array JSON, or null when the IPC is missing/failed.</summary>
+    public static string? CharonLevelingJobLevelsJson()
+    {
+        RefreshCharonLevelingSubscribers();
+        if (_charonLevelingJobLevels is not { HasFunction: true })
+            return null;
+
+        try { return _charonLevelingJobLevels.InvokeFunc(); }
+        catch (IpcNotReadyError) { _charonLevelingJobLevels = null; return null; }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "Charon.Leveling.GetJobLevelsJson IPC failed");
+            return null;
+        }
+    }
+
+    /// <summary>Raw status JSON, or null when the IPC is missing/failed.</summary>
+    public static string? CharonLevelingStatusJson()
+    {
+        RefreshCharonLevelingSubscribers();
+        if (_charonLevelingStatus is not { HasFunction: true })
+            return null;
+
+        try { return _charonLevelingStatus.InvokeFunc(); }
+        catch (IpcNotReadyError) { _charonLevelingStatus = null; return null; }
+        catch { return null; }
+    }
+
+    /// <summary>True = Charon ACCEPTED the switch — completion is the player's ClassJob changing.</summary>
+    public static bool CharonLevelingSwitchJob(uint classJobRow)
+    {
+        RefreshCharonLevelingSubscribers();
+        if (_charonLevelingSwitchJob is not { HasFunction: true })
+            return false;
+
+        try { return _charonLevelingSwitchJob.InvokeFunc(classJobRow); }
+        catch (IpcNotReadyError) { _charonLevelingSwitchJob = null; return false; }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "Charon.Leveling.SwitchJob IPC failed");
+            return false;
+        }
+    }
+
+    // ── Daedalus LAN relay (cross-machine channel bus) ────────
+    //   Daedalus.Relay.Publish       Action<string channel, string json> — broadcast to every OTHER
+    //                                client (LAN + same-machine siblings). The publisher never
+    //                                receives its own frame; act locally as well as broadcasting.
+    //   Daedalus.Relay.Message       event (channel, json) — fired on the framework thread.
+    //   Daedalus.Party.GetTrustListJson  Func<string> — trusted toon names, "[]" when LAN off.
+    //   Gates are registered even with the LAN coordinator disabled (Publish becomes a no-op).
+
+    private const string DaedalusPluginInternalName = "Daedalus";
+
+    private static ICallGateSubscriber<string, string, object?>? _daedalusRelayPublish;
+    private static ICallGateSubscriber<string, string, object?>? _daedalusRelayMessage;
+    private static ICallGateSubscriber<string>? _daedalusTrustList;
+    private static Action<string, string>? _daedalusRelayHandler;
+
+    public static bool DaedalusPluginLoaded => IsPluginLoaded(DaedalusPluginInternalName);
+
+    public static bool DaedalusRelayAvailable
+    {
+        get
+        {
+            if (!DaedalusPluginLoaded)
+                return false;
+
+            RefreshDaedalusSubscribers();
+            return _daedalusRelayPublish?.HasAction ?? false;
+        }
+    }
+
+    private static void RefreshDaedalusSubscribers()
+    {
+        try
+        {
+            _daedalusRelayPublish ??= Service.PluginInterface.GetIpcSubscriber<string, string, object?>("Daedalus.Relay.Publish");
+            _daedalusRelayMessage ??= Service.PluginInterface.GetIpcSubscriber<string, string, object?>("Daedalus.Relay.Message");
+            _daedalusTrustList ??= Service.PluginInterface.GetIpcSubscriber<string>("Daedalus.Party.GetTrustListJson");
+        }
+        catch
+        {
+            // Availability is checked via HasAction/HasFunction per call.
+        }
+    }
+
+    public static bool DaedalusRelayPublish(string channel, string json)
+    {
+        RefreshDaedalusSubscribers();
+        if (_daedalusRelayPublish is not { HasAction: true })
+            return false;
+
+        try { _daedalusRelayPublish.InvokeAction(channel, json); return true; }
+        catch (IpcNotReadyError) { _daedalusRelayPublish = null; return false; }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "Daedalus.Relay.Publish IPC failed");
+            return false;
+        }
+    }
+
+    /// <summary>Subscribe to relay frames. One handler at a time — a second call replaces the first.</summary>
+    public static void DaedalusRelaySubscribe(Action<string, string> handler)
+    {
+        RefreshDaedalusSubscribers();
+        if (_daedalusRelayMessage == null)
+            return;
+
+        DaedalusRelayUnsubscribe();
+        _daedalusRelayHandler = handler;
+        try { _daedalusRelayMessage.Subscribe(handler); }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "Daedalus.Relay.Message subscribe failed");
+            _daedalusRelayHandler = null;
+        }
+    }
+
+    public static void DaedalusRelayUnsubscribe()
+    {
+        if (_daedalusRelayMessage == null || _daedalusRelayHandler == null)
+            return;
+
+        try { _daedalusRelayMessage.Unsubscribe(_daedalusRelayHandler); }
+        catch { /* gate already gone */ }
+        _daedalusRelayHandler = null;
+    }
+
+    /// <summary>Trusted toon names JSON array, or null when the gate is missing/failed.</summary>
+    public static string? DaedalusTrustListJson()
+    {
+        RefreshDaedalusSubscribers();
+        if (_daedalusTrustList is not { HasFunction: true })
+            return null;
+
+        try { return _daedalusTrustList.InvokeFunc(); }
+        catch (IpcNotReadyError) { _daedalusTrustList = null; return null; }
+        catch { return null; }
+    }
+
     // ── vnavmesh ──────────────────────────────────────────────
     private static ICallGateSubscriber<Vector3, bool, bool>? _vnavPathfind;
     private static ICallGateSubscriber<Vector3, bool, float, bool>? _vnavPathfindClose;
@@ -1107,6 +1292,13 @@ internal static class IpcManager
         _charonEquipUpgrades = null;
         _charonEquipBusy = null;
         _charonPendingUpgrades = null;
+        _charonLevelingJobLevels = null;
+        _charonLevelingStatus = null;
+        _charonLevelingSwitchJob = null;
+        DaedalusRelayUnsubscribe();
+        _daedalusRelayPublish = null;
+        _daedalusRelayMessage = null;
+        _daedalusTrustList = null;
         _vnavPathfind      = null;
         _vnavPathfindClose = null;
         _vnavIsReady       = null;

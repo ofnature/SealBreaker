@@ -101,6 +101,12 @@ public class Configuration : IPluginConfiguration
     // ── Farm mode ─────────────────────────────────────────────
     public const int FarmModeGrandCompany = 0;
     public const int FarmModeTomestoneRelic = 1;
+    public const int FarmModeLeveling = 2;
+    public const int FarmModeMoogle = 3;
+
+    public const int MoogleRoleSolo = 0;
+    public const int MoogleRoleLeader = 1;
+    public const int MoogleRoleMember = 2;
 
     /// <summary>0 = Grand Company seal loop, 1 = Tomestone relic farm
     /// (run a Mathematics dungeon, buy arcanite in Phantom Village).</summary>
@@ -119,6 +125,22 @@ public class Configuration : IPluginConfiguration
     /// <summary>Arcanite keep amounts (itemId → how many to own). 0/absent = don't buy that one.
     /// The farm stops once every non-zero keep amount is reached.</summary>
     public Dictionary<uint, int> RelicKeepAmounts { get; set; } = new();
+
+    /// <summary>Leveling mode: raise every eligible job to this level, then stop. Clamped at
+    /// run time to the account's live level cap from Charon.</summary>
+    public int LevelingGateTarget { get; set; } = 30;
+
+    // ── Moogle tomestone farm ─────────────────────────────────
+    /// <summary>0 Solo, 1 Leader (queues, holds for member repairs), 2 Member (repairs and reports).</summary>
+    public int MoogleGroupRole { get; set; } = MoogleRoleSolo;
+
+    /// <summary>Duty the moogle farm runs — trials included. Defaults: the Porta Decumana.</summary>
+    public uint MoogleDutyCfcId { get; set; } = 830;
+    public uint MoogleDutyTerritory { get; set; } = 1048;
+    public string MoogleDutyName { get; set; } = "The Porta Decumana";
+
+    /// <summary>Leader: give up on a repair hold after this long and queue anyway (crashed client guard).</summary>
+    public int MoogleHoldMaxWaitSeconds { get; set; } = 300;
 
     // ── Duty ──────────────────────────────────────────────────
     /// <summary>Locked to 1 unless AllowMultiRunPerCycle is accepted — multi-run cycles are the risky path.</summary>

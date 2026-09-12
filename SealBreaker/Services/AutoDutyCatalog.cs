@@ -14,12 +14,18 @@ internal sealed record AutoDutyDuty(
     bool HasDutySupport,
     uint Expansion,
     string ExpansionName,
-    uint InstanceContentId);
+    uint InstanceContentId,
+    uint ContentTypeId = AutoDutyCatalog.ContentTypeDungeon);
 
-/// <summary>Dungeon catalog for the AutoDuty runner — all dungeons, not just Duty Support ones.</summary>
+/// <summary>Dungeon catalog for the AutoDuty runner — all dungeons, not just Duty Support ones.
+/// <see cref="DutiesWithTrials"/> adds trials for the moogle tomestone farm.</summary>
 internal static class AutoDutyCatalog
 {
+    public const uint ContentTypeDungeon = 2;
+    public const uint ContentTypeTrial = 4;
+
     private static List<AutoDutyDuty>? _duties;
+    private static List<AutoDutyDuty>? _dutiesWithTrials;
 
     public static IReadOnlyList<AutoDutyDuty> Duties
     {
@@ -30,19 +36,32 @@ internal static class AutoDutyCatalog
         }
     }
 
+    /// <summary>Dungeons AND trials, same ordering — used only by the moogle farm's duty picker.</summary>
+    public static IReadOnlyList<AutoDutyDuty> DutiesWithTrials
+    {
+        get
+        {
+            EnsureInitialized();
+            return _dutiesWithTrials!;
+        }
+    }
+
     public static void EnsureInitialized()
     {
         if (_duties != null)
             return;
 
-        _duties = BuildFromGameData();
-        EnsureMistwakeFallback(_duties);
-        _duties = _duties
+        var all = BuildFromGameData();
+        EnsureMistwakeFallback(all);
+        all = all
             .OrderBy(d => d.Expansion)
             .ThenBy(d => d.RequiredLevel)
             .ThenBy(d => d.RequiredItemLevel)
             .ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+        _dutiesWithTrials = all;
+        _duties = all.Where(d => d.ContentTypeId == ContentTypeDungeon).ToList();
     }
 
     public static AutoDutyDuty SelectedOrDefault(Configuration cfg)
@@ -108,7 +127,8 @@ internal static class AutoDutyCatalog
                 if (condition.Name.ExtractText() is not { Length: > 0 } name)
                     continue;
 
-                if (condition.ContentType.ValueNullable?.RowId != 2)
+                var contentType = condition.ContentType.ValueNullable?.RowId ?? 0;
+                if (contentType is not (ContentTypeDungeon or ContentTypeTrial))
                     continue;
 
                 var territory = condition.TerritoryType.ValueNullable;
@@ -126,7 +146,8 @@ internal static class AutoDutyCatalog
                     dutySupportIds.Contains(condition.RowId),
                     exVersion.RowId,
                     string.IsNullOrWhiteSpace(expansionName) ? $"Expansion {exVersion.RowId}" : expansionName,
-                    condition.ContentLinkType == 1 ? condition.Content.RowId : 0));
+                    condition.ContentLinkType == 1 ? condition.Content.RowId : 0,
+                    contentType));
             }
         }
         catch (Exception ex)
