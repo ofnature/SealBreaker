@@ -326,6 +326,10 @@ public sealed class FarmController : IDisposable
         Service.Framework.Update += OnFrameworkUpdate;
         _addonLifecycle.Register(AddonEvent.PostSetup, "GrandCompanySupplyList", OnSupplyListPostSetup);
         IpcManager.DaedalusRelaySubscribe(OnDaedalusRelayMessage);
+        _onDutyStarted = _ => _dutyCompletedSeen = false;
+        _onDutyCompleted = _ => _dutyCompletedSeen = true;
+        Service.DutyState.DutyStarted += _onDutyStarted;
+        Service.DutyState.DutyCompleted += _onDutyCompleted;
     }
 
     public void Dispose()
@@ -333,8 +337,17 @@ public sealed class FarmController : IDisposable
         Service.Framework.Update -= OnFrameworkUpdate;
         _addonLifecycle.Dispose();
         IpcManager.DaedalusRelayUnsubscribe();
+        Service.DutyState.DutyStarted -= _onDutyStarted;
+        Service.DutyState.DutyCompleted -= _onDutyCompleted;
         IpcManager.VnavStop();
     }
+
+    /// <summary>Set on the DutyCompleted event, cleared when the next duty starts — trials have no
+    /// exit walk, so this is the "safe to leave" signal for the moogle farm.</summary>
+    private bool _dutyCompletedSeen;
+
+    private readonly IDutyState.DutyStartedDelegate _onDutyStarted;
+    private readonly IDutyState.DutyCompletedDelegate _onDutyCompleted;
 
     /// <summary>HaselTweaks-style Expert Deliveries tweak: flip the supply window to the Expert Delivery tab as it opens.
     /// Only active while the farm or a test is running so manual use is untouched once stopped.</summary>
@@ -419,6 +432,7 @@ public sealed class FarmController : IDisposable
         _relicSpendTestMode = false;
         _levelingRotationDoneThisCycle = false; _levelingSwitchFailed.Clear(); _levelingSwitchRejects = 0;
         _memberWasInDuty = false; _memberHoldActive = false; _memberExitSettleAt = null;
+        _memberDutyCompletedAt = null; _moogleLeaveLastSent = DateTime.MinValue; _dutyCompletedSeen = false;
         lock (_repairHolds) _repairHolds.Clear();
         _tomeRunSnapshot.Clear();
         if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
@@ -812,11 +826,12 @@ public sealed class FarmController : IDisposable
                     break;
                 }
 
-                // Moogle leader: don't queue while a trusted member is broadcasting a repair hold.
+                // Moogle leader: don't queue while a trusted member is broadcasting a repair hold,
+                // or while any party member is still inside the duty (their pop couldn't fire).
                 if (cfg.FarmMode == Configuration.FarmModeMoogle
                     && cfg.MoogleGroupRole == Configuration.MoogleRoleLeader
                     && !IsMidDutyCycle(cfg)
-                    && FreshRepairHolds().Count > 0)
+                    && (FreshRepairHolds().Count > 0 || PartyMembersStillInDuty(cfg).Count > 0))
                 {
                     _moogleHoldWaitStart = DateTime.Now;
                     GotoState(FarmState.MoogleHoldWait);
@@ -895,6 +910,12 @@ public sealed class FarmController : IDisposable
 
                 if (runner == 0 && dutyStopped)
                     RecordAutoDutyStopped();
+
+                // Moogle farm: trials have no exit walk — once the fight is complete and AutoDuty
+                // has stopped, leave via the duty finder (leader also tells the fleet's Charon).
+                if (cfg.FarmMode == Configuration.FarmModeMoogle && runner == 0 && dutyStopped
+                    && InDuty() && _dutyCompletedSeen)
+                    MoogleLeaveDutyTick(cfg);
 
                 if (runner == 1 && InDuty())
                 {
@@ -1274,9 +1295,10 @@ public sealed class FarmController : IDisposable
             case FarmState.MoogleHoldWait:
             {
                 var holds = FreshRepairHolds();
-                if (holds.Count == 0)
+                var inside = PartyMembersStillInDuty(cfg);
+                if (holds.Count == 0 && inside.Count == 0)
                 {
-                    Log("Repair holds clear — queueing the next duty");
+                    Log("Group ready (holds clear, everyone out of the duty) — queueing the next duty");
                     GotoState(FarmState.StartDuty);
                     break;
                 }
@@ -1284,14 +1306,17 @@ public sealed class FarmController : IDisposable
                 var maxWait = TimeSpan.FromSeconds(Math.Max(30, cfg.MoogleHoldMaxWaitSeconds));
                 if (DateTime.Now - _moogleHoldWaitStart > maxWait)
                 {
-                    Log($"WARN: repair hold from {string.Join(", ", holds)} exceeded {(int)maxWait.TotalSeconds}s — queueing anyway");
+                    var who = holds.Concat(inside).Distinct(StringComparer.OrdinalIgnoreCase);
+                    Log($"WARN: waited over {(int)maxWait.TotalSeconds}s on {string.Join(", ", who)} — queueing anyway");
                     lock (_repairHolds)
                         _repairHolds.Clear();
                     GotoState(FarmState.StartDuty);
                     break;
                 }
 
-                StatusQuiet($"Holding next duty — repairing: {string.Join(", ", holds)}");
+                StatusQuiet(inside.Count > 0
+                    ? $"Waiting for the party to leave the duty: {string.Join(", ", inside)}"
+                    : $"Holding next duty — repairing: {string.Join(", ", holds)}");
                 break;
             }
 
@@ -1303,10 +1328,34 @@ public sealed class FarmController : IDisposable
                     {
                         _memberWasInDuty = true;
                         _memberExitSettleAt = null;
+                        _memberDutyCompletedAt = null;
                         _currentRunStart = DateTime.Now;
                         CaptureTomeRunSnapshot();
                         Status($"In duty (member) — run {TotalRuns + 1}");
                     }
+
+                    // Leave on completion after a short randomized grace — Charon's fleet-leave
+                    // may beat us to it (fine), but with two groups on one LAN only one group's
+                    // configured Charon leader matches, so members must exit on their own.
+                    // Completion-gated: a fight in progress is never abandoned.
+                    if (_dutyCompletedSeen)
+                    {
+                        if (_memberDutyCompletedAt == null)
+                        {
+                            _memberDutyCompletedAt = DateTime.Now;
+                            _memberLeaveGrace = TimeSpan.FromSeconds(3 + Jitter(3000, 6000) / 1000.0);
+                        }
+
+                        if (DateTime.Now - _memberDutyCompletedAt.Value > _memberLeaveGrace
+                            && DateTime.Now - _moogleLeaveLastSent >= TimeSpan.FromSeconds(5))
+                        {
+                            _moogleLeaveLastSent = DateTime.Now;
+                            Log(TryLeaveDutyLocal()
+                                ? "Duty complete — leaving the trial..."
+                                : "WARN: leave-duty call failed — will retry");
+                        }
+                    }
+
                     break;
                 }
 
@@ -3638,8 +3687,6 @@ public sealed class FarmController : IDisposable
     {
         if (Plugin.Config.FarmMode == Configuration.FarmModeTomestoneRelic)
             ApplyRelicModeDutyPick(Plugin.Config);
-        else if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
-            ApplyMoogleModeDutyPick(Plugin.Config);
         else if (Plugin.Config.LevelingMode || Plugin.Config.FarmMode == Configuration.FarmModeLeveling)
             await Service.Framework.RunOnFrameworkThread(() => ApplyLevelingModeDutyPick(Plugin.Config));
 
@@ -3665,7 +3712,9 @@ public sealed class FarmController : IDisposable
             if (!TryPrepareAutoDutyRun())
                 return false;
 
-            var autoDutyDuty = AutoDutyCatalog.SelectedOrDefault(Plugin.Config);
+            var autoDutyDuty = Plugin.Config.FarmMode == Configuration.FarmModeMoogle
+                ? AutoDutyCatalog.MoogleSelectedOrDefault(Plugin.Config)
+                : AutoDutyCatalog.SelectedOrDefault(Plugin.Config);
             if (!IpcManager.AutoDutyContentHasPath(autoDutyDuty.TerritoryType))
             {
                 await SetErrorAsync($"AutoDuty has no path for {autoDutyDuty.Name} (territory {autoDutyDuty.TerritoryType}) — pick another duty or update AutoDuty");
@@ -6710,8 +6759,74 @@ public sealed class FarmController : IDisposable
     private DateTime _moogleHoldWaitStart;
     private bool _memberWasInDuty;
     private DateTime? _memberExitSettleAt;
+    private DateTime? _memberDutyCompletedAt;
+    private TimeSpan _memberLeaveGrace = TimeSpan.FromSeconds(5);
     private bool _memberHoldActive;
     private DateTime _memberHoldLastSent = DateTime.MinValue;
+    private DateTime _moogleLeaveLastSent = DateTime.MinValue;
+
+    /// <summary>Leave the completed trial: leader broadcasts Charon's fleet leave-duty frame so
+    /// every member's Charon walks out (with its own trust gates and stagger), then leaves locally
+    /// — the relay never delivers a publisher's own frame back. Retried every 5s while inside.</summary>
+    private void MoogleLeaveDutyTick(Configuration cfg)
+    {
+        if (DateTime.Now - _moogleLeaveLastSent < TimeSpan.FromSeconds(5))
+            return;
+
+        _moogleLeaveLastSent = DateTime.Now;
+
+        if (cfg.MoogleGroupRole == Configuration.MoogleRoleLeader)
+        {
+            var me = Service.ObjectTable.LocalPlayer?.Name.TextValue ?? "";
+            if (me.Length > 0
+                && IpcManager.DaedalusRelayPublish("charon.fleet",
+                    System.Text.Json.JsonSerializer.Serialize(new { from = me, act = "leave", leader = me })))
+                Log("Duty complete — fleet leave broadcast sent (charon.fleet)");
+        }
+
+        Log(TryLeaveDutyLocal()
+            ? "Duty complete — leaving the trial..."
+            : "WARN: leave-duty call failed — will retry");
+    }
+
+    /// <summary>Party members whose territory is still the moogle duty's — server truth from the
+    /// party list, so the leader never queues while someone's pop couldn't fire. The leader itself
+    /// is naturally excluded: this only runs once the leader is back outside.</summary>
+    private static List<string> PartyMembersStillInDuty(Configuration cfg)
+    {
+        var inside = new List<string>();
+        try
+        {
+            var dutyTerritory = AutoDutyCatalog.MoogleSelectedOrDefault(cfg).TerritoryType;
+            foreach (var member in Service.PartyList)
+            {
+                if (member.Territory.RowId == dutyTerritory
+                    && member.Name.TextValue is { Length: > 0 } name)
+                    inside.Add(name);
+            }
+        }
+        catch
+        {
+            // party list unreadable mid-transition — treat as nobody inside rather than wedge
+        }
+
+        return inside;
+    }
+
+    /// <summary>Typed EventFramework.LeaveCurrentContent — the same call Charon's fleet leave uses.</summary>
+    private static bool TryLeaveDutyLocal()
+    {
+        try
+        {
+            FFXIVClientStructs.FFXIV.Client.Game.Event.EventFramework.LeaveCurrentContent(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "[SealBreaker] LeaveCurrentContent threw");
+            return false;
+        }
+    }
 
     /// <summary>Relay frames arrive on the framework thread. Holds are accepted only from toons
     /// on Daedalus's trust list (when one is available) and expire by freshness — see RepairHoldRelay.</summary>
@@ -6729,6 +6844,15 @@ public sealed class FarmController : IDisposable
             if (!IsTrustedLanToon(msg.Name))
                 return;
 
+            // Relay frames are LAN-wide with no group scoping — multiple groups can farm at
+            // once, so only holds from OUR party members count (party persists across zones,
+            // so a member repairing in town still matches).
+            if (!IsInMyParty(msg.Name))
+            {
+                Service.PluginLog.Debug($"[SealBreaker] Ignoring repair hold from {msg.Name} — not in our party");
+                return;
+            }
+
             lock (_repairHolds)
             {
                 var isNew = !_repairHolds.ContainsKey(msg.Name);
@@ -6745,6 +6869,24 @@ public sealed class FarmController : IDisposable
                     Log($"Repair hold cleared by {msg.Name}");
             }
         }
+    }
+
+    private static bool IsInMyParty(string name)
+    {
+        try
+        {
+            foreach (var member in Service.PartyList)
+            {
+                if (member.Name.TextValue.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch
+        {
+            // party list unreadable mid-transition — the member re-broadcasts every 2s anyway
+        }
+
+        return false;
     }
 
     private static List<string>? _lanTrustCache;
@@ -6947,27 +7089,6 @@ public sealed class FarmController : IDisposable
 
         _tomeRunSnapshot.Clear();
         Log($"Run gained {gained} irregular tomestone(s) — session {MoogleSessionTomeGain()}, {MoogleTomesPerHour():F0}/hr");
-    }
-
-    /// <summary>Moogle mode: force the AutoDuty selection to the configured moogle duty (trials included).</summary>
-    private void ApplyMoogleModeDutyPick(Configuration cfg)
-    {
-        AutoDutyCatalog.EnsureInitialized();
-        var duty = AutoDutyCatalog.DutiesWithTrials.FirstOrDefault(d =>
-                d.ContentFinderConditionId != 0 && d.ContentFinderConditionId == cfg.MoogleDutyCfcId)
-            ?? AutoDutyCatalog.DutiesWithTrials.FirstOrDefault(d => d.TerritoryType == cfg.MoogleDutyTerritory);
-        if (duty == null)
-        {
-            Log($"WARN: moogle duty (cfc {cfg.MoogleDutyCfcId}) not found in the catalog — keeping the current duty selection");
-            return;
-        }
-
-        if (duty.TerritoryType == cfg.AutoDutyTerritoryType
-            && duty.ContentFinderConditionId == cfg.AutoDutyContentFinderConditionId)
-            return;
-
-        AutoDutyCatalog.ApplySelection(cfg, duty);
-        Log($"Moogle farm: duty set to {duty.Name}");
     }
 
     public static int GetDuckBoneInventoryCount() =>

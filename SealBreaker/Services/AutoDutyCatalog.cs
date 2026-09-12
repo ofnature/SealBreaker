@@ -81,6 +81,27 @@ internal static class AutoDutyCatalog
         return _duties!.First(d => d.TerritoryType == DutySupportCatalog.MistwakeTerritoryType);
     }
 
+    /// <summary>The moogle farm's duty, resolved against the trials-included list — never
+    /// <see cref="SelectedOrDefault"/>, whose dungeons-only search would fall back to Mistwake.</summary>
+    public static AutoDutyDuty MoogleSelectedOrDefault(Configuration cfg)
+    {
+        EnsureInitialized();
+
+        var selected = _dutiesWithTrials!.FirstOrDefault(d =>
+            d.ContentFinderConditionId != 0
+            && d.ContentFinderConditionId == cfg.MoogleDutyCfcId);
+        if (selected != null)
+            return selected;
+
+        selected = _dutiesWithTrials!.FirstOrDefault(d => d.TerritoryType == cfg.MoogleDutyTerritory);
+        if (selected != null)
+            return selected;
+
+        // The Porta Decumana, then anything at all.
+        return _dutiesWithTrials!.FirstOrDefault(d => d.ContentFinderConditionId == 830)
+            ?? _dutiesWithTrials![0];
+    }
+
     public static int IndexOfSelected(Configuration cfg)
     {
         var selected = SelectedOrDefault(cfg);

@@ -22,6 +22,8 @@ internal class Service
     [PluginService] internal static IAddonLifecycle         AddonLifecycle  { get; private set; } = null!;
     [PluginService] internal static ITargetManager          TargetManager   { get; private set; } = null!;
     [PluginService] internal static ITextureProvider        TextureProvider { get; private set; } = null!;
+    [PluginService] internal static IDutyState              DutyState       { get; private set; } = null!;
+    [PluginService] internal static IPartyList              PartyList       { get; private set; } = null!;
 }
 
 /// <summary>
