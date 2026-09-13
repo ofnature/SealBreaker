@@ -327,9 +327,27 @@ public sealed class FarmController : IDisposable
         _addonLifecycle.Register(AddonEvent.PostSetup, "GrandCompanySupplyList", OnSupplyListPostSetup);
         IpcManager.DaedalusRelaySubscribe(OnDaedalusRelayMessage);
         _onDutyStarted = _ => _dutyCompletedSeen = false;
-        _onDutyCompleted = _ => _dutyCompletedSeen = true;
+        _onDutyCompleted = _ =>
+        {
+            _dutyCompletedSeen = true;
+            _moogleDutyCompletedAt = DateTime.Now;
+        };
         Service.DutyState.DutyStarted += _onDutyStarted;
         Service.DutyState.DutyCompleted += _onDutyCompleted;
+        Service.ClientState.TerritoryChanged += OnTerritoryChanged;
+    }
+
+    /// <summary>
+    /// A completion belongs to the duty it happened in. DutyStarted alone cleared it too late: it
+    /// fires when the barrier drops, and from zone-in until then the next duty still read as
+    /// "complete" — so a member's randomized leave grace could expire first and walk that toon out
+    /// before the fight began, and the leader would broadcast a fleet leave on the same stale flag.
+    /// Any zone change ends the old duty, so clearing here closes the gap in both directions.
+    /// </summary>
+    private void OnTerritoryChanged(uint territoryId)
+    {
+        _dutyCompletedSeen = false;
+        _memberDutyCompletedAt = null;
     }
 
     public void Dispose()
@@ -339,11 +357,12 @@ public sealed class FarmController : IDisposable
         IpcManager.DaedalusRelayUnsubscribe();
         Service.DutyState.DutyStarted -= _onDutyStarted;
         Service.DutyState.DutyCompleted -= _onDutyCompleted;
+        Service.ClientState.TerritoryChanged -= OnTerritoryChanged;
         IpcManager.VnavStop();
     }
 
-    /// <summary>Set on the DutyCompleted event, cleared when the next duty starts — trials have no
-    /// exit walk, so this is the "safe to leave" signal for the moogle farm.</summary>
+    /// <summary>Set on the DutyCompleted event, cleared on any zone change and when the next duty
+    /// starts — trials have no exit walk, so this is the "safe to leave" signal for the moogle farm.</summary>
     private bool _dutyCompletedSeen;
 
     private readonly IDutyState.DutyStartedDelegate _onDutyStarted;
@@ -384,9 +403,9 @@ public sealed class FarmController : IDisposable
 
         if (Plugin.Config.FarmMode == Configuration.FarmModeTomestoneRelic)
         {
-            if (Plugin.Config.DutyRunner != 0)
+            if (Plugin.Config.DutyRunner == 1)
             {
-                Log("Cannot start — the tomestone relic farm requires AutoDuty (switch Duty runner on the Duty page).");
+                Log("Cannot start — the tomestone relic farm needs AutoDuty or Theseus (switch Duty runner on the Duty page).");
                 return;
             }
 
@@ -407,9 +426,9 @@ public sealed class FarmController : IDisposable
         if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
         {
             if (Plugin.Config.MoogleGroupRole != Configuration.MoogleRoleMember
-                && Plugin.Config.DutyRunner != 0)
+                && Plugin.Config.DutyRunner == 1)
             {
-                Log("Cannot start — the moogle farm queues through AutoDuty (switch Duty runner on the Duty page).");
+                Log("Cannot start — the moogle farm queues through AutoDuty or Theseus (switch Duty runner on the Duty page).");
                 return;
             }
 
@@ -433,6 +452,8 @@ public sealed class FarmController : IDisposable
         _levelingRotationDoneThisCycle = false; _levelingSwitchFailed.Clear(); _levelingSwitchRejects = 0;
         _memberWasInDuty = false; _memberHoldActive = false; _memberExitSettleAt = null;
         _memberDutyCompletedAt = null; _moogleLeaveLastSent = DateTime.MinValue; _dutyCompletedSeen = false;
+        _moogleAllClearSince = null; _moogleGroupReadyThisCycle = false; _dutyNotStartedSince = null;
+        _autoDutyBusyWaitSince = null;
         lock (_repairHolds) _repairHolds.Clear();
         _tomeRunSnapshot.Clear();
         if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
@@ -826,14 +847,17 @@ public sealed class FarmController : IDisposable
                     break;
                 }
 
-                // Moogle leader: don't queue while a trusted member is broadcasting a repair hold,
-                // or while any party member is still inside the duty (their pop couldn't fire).
+                // Moogle leader: every cycle waits for the group — no fresh holds (repairing OR
+                // zoning members), nobody still inside the duty, and that all-clear stable for a
+                // few seconds. Queueing while a member is mid-zone locks the leader out of the
+                // Duty Finder ("a party member is currently changing zones").
                 if (cfg.FarmMode == Configuration.FarmModeMoogle
                     && cfg.MoogleGroupRole == Configuration.MoogleRoleLeader
                     && !IsMidDutyCycle(cfg)
-                    && (FreshRepairHolds().Count > 0 || PartyMembersStillInDuty(cfg).Count > 0))
+                    && !_moogleGroupReadyThisCycle)
                 {
                     _moogleHoldWaitStart = DateTime.Now;
+                    _moogleAllClearSince = null;
                     GotoState(FarmState.MoogleHoldWait);
                     break;
                 }
@@ -879,7 +903,7 @@ public sealed class FarmController : IDisposable
             case FarmState.WaitingForDutyStart:
                 if (InDuty())
                 {
-                    if (cfg.DutyRunner == 1 && _adsNeedsStartInside)
+                    if (ActiveRunner == 1 && _adsNeedsStartInside)
                     {
                         if (!TryStartAdsInsideDuty())
                         {
@@ -890,6 +914,12 @@ public sealed class FarmController : IDisposable
 
                     _cycleCounted = false;
                     _levelingRotationDoneThisCycle = false;
+                    _moogleGroupReadyThisCycle = false;
+                    // The game's DutyStarted event fires only once the fight actually begins —
+                    // never carry the PREVIOUS run's completion into this one, or the leave
+                    // logic fires during the entry barrier and boots us out of the fresh duty.
+                    _dutyCompletedSeen = false;
+                    _dutyNotStartedSince = null;
                     if (cfg.FarmMode == Configuration.FarmModeMoogle)
                         CaptureTomeRunSnapshot();
                     _currentRunStart = DateTime.Now;
@@ -903,18 +933,23 @@ public sealed class FarmController : IDisposable
 
             case FarmState.WaitingForDutyComplete:
             {
-                var runner = cfg.DutyRunner;
-                var dutyStopped = runner == 0
-                    ? IpcManager.AutoDutyIsStopped()
-                    : IpcManager.AdsIsStopped();
+                var runner = ActiveRunner;
+                var dutyStopped = runner switch
+                {
+                    0 => IpcManager.AutoDutyIsStopped(),
+                    1 => IpcManager.AdsIsStopped(),
+                    _ => !IpcManager.TheseusIsBusy(),
+                };
 
                 if (runner == 0 && dutyStopped)
                     RecordAutoDutyStopped();
 
-                // Moogle farm: trials have no exit walk — once the fight is complete and AutoDuty
-                // has stopped, leave via the duty finder (leader also tells the fleet's Charon).
-                if (cfg.FarmMode == Configuration.FarmModeMoogle && runner == 0 && dutyStopped
-                    && InDuty() && _dutyCompletedSeen)
+                // Moogle farm: trials have no exit walk — once the fight is complete, leave via
+                // the duty finder (leader also tells the fleet's Charon). Deliberately NOT gated
+                // on dutyStopped: AutoDuty can sit "running" forever waiting for an exit that a
+                // trial doesn't have, which stranded the leader while members left.
+                if (cfg.FarmMode == Configuration.FarmModeMoogle && runner != 1
+                    && InDuty() && MoogleDutyLooksEnded())
                     MoogleLeaveDutyTick(cfg);
 
                 if (runner == 1 && InDuty())
@@ -1298,10 +1333,22 @@ public sealed class FarmController : IDisposable
                 var inside = PartyMembersStillInDuty(cfg);
                 if (holds.Count == 0 && inside.Count == 0)
                 {
-                    Log("Group ready (holds clear, everyone out of the duty) — queueing the next duty");
-                    GotoState(FarmState.StartDuty);
+                    // All clear must HOLD for a few seconds: a member mid-loading-screen can
+                    // already read as "out" while its client is still changing zones.
+                    _moogleAllClearSince ??= DateTime.Now;
+                    if (DateTime.Now - _moogleAllClearSince.Value >= TimeSpan.FromSeconds(8))
+                    {
+                        _moogleGroupReadyThisCycle = true;
+                        Log("Group ready (everyone out, holds clear, settled) — queueing the next duty");
+                        GotoState(FarmState.StartDuty);
+                        break;
+                    }
+
+                    StatusQuiet("Group clear — settling before the next queue...");
                     break;
                 }
+
+                _moogleAllClearSince = null;
 
                 var maxWait = TimeSpan.FromSeconds(Math.Max(30, cfg.MoogleHoldMaxWaitSeconds));
                 if (DateTime.Now - _moogleHoldWaitStart > maxWait)
@@ -1310,13 +1357,14 @@ public sealed class FarmController : IDisposable
                     Log($"WARN: waited over {(int)maxWait.TotalSeconds}s on {string.Join(", ", who)} — queueing anyway");
                     lock (_repairHolds)
                         _repairHolds.Clear();
+                    _moogleGroupReadyThisCycle = true;
                     GotoState(FarmState.StartDuty);
                     break;
                 }
 
                 StatusQuiet(inside.Count > 0
                     ? $"Waiting for the party to leave the duty: {string.Join(", ", inside)}"
-                    : $"Holding next duty — repairing: {string.Join(", ", holds)}");
+                    : $"Holding next duty — waiting on: {string.Join(", ", holds)}");
                 break;
             }
 
@@ -1329,6 +1377,10 @@ public sealed class FarmController : IDisposable
                         _memberWasInDuty = true;
                         _memberExitSettleAt = null;
                         _memberDutyCompletedAt = null;
+                        // Same stale-flag guard as the leader: DutyStarted fires late, so the
+                        // previous run's completion must never leak into this run's leave gate.
+                        _dutyCompletedSeen = false;
+                        _dutyNotStartedSince = null;
                         _currentRunStart = DateTime.Now;
                         CaptureTomeRunSnapshot();
                         Status($"In duty (member) — run {TotalRuns + 1}");
@@ -1337,8 +1389,8 @@ public sealed class FarmController : IDisposable
                     // Leave on completion after a short randomized grace — Charon's fleet-leave
                     // may beat us to it (fine), but with two groups on one LAN only one group's
                     // configured Charon leader matches, so members must exit on their own.
-                    // Completion-gated: a fight in progress is never abandoned.
-                    if (_dutyCompletedSeen)
+                    // End-gated: a fight in progress is never abandoned.
+                    if (MoogleDutyLooksEnded())
                     {
                         if (_memberDutyCompletedAt == null)
                         {
@@ -1361,9 +1413,12 @@ public sealed class FarmController : IDisposable
 
                 if (_memberWasInDuty)
                 {
-                    // Wait until fully zoned out and settled before acting on the run's end.
+                    // Wait until fully zoned out and settled before acting on the run's end —
+                    // and hold the leader's queue the whole time: queueing while we're mid-zone
+                    // locks the leader out of the Duty Finder.
                     if (!CanRunWorldAutomation())
                     {
+                        SetMemberHold(true, "zoning");
                         _memberExitSettleAt = null;
                         StatusQuiet("Leaving duty...");
                         break;
@@ -1396,11 +1451,9 @@ public sealed class FarmController : IDisposable
                     // at StartDuty, which bounces members back here (and that return clears the hold).
                     if (ShouldRepairBetweenRuns())
                     {
-                        SetMemberHold(true);
+                        SetMemberHold(true, "repairing");
                         if (TryBeginRepairBeforeDuty())
                             break;
-
-                        SetMemberHold(false); // repair refused to start — don't wedge the leader
                     }
 
                     break;
@@ -3683,6 +3736,38 @@ public sealed class FarmController : IDisposable
         }
     }
 
+    /// <summary>
+    /// The runner that launched the current run, or -1 before any launch. Usually the configured
+    /// runner — but a grouped ADS launch is handed to Theseus, and everything after the launch
+    /// (waiting, leaving, stopping) must watch the runner that is actually driving.
+    /// </summary>
+    private int _launchRunner = -1;
+
+    private int ActiveRunner => _launchRunner >= 0 ? _launchRunner : Plugin.Config.DutyRunner;
+
+    /// <summary>
+    /// Grouped with at least one other real player. Only real characters carry a content id, so
+    /// this holds even for members out of range, and never counts Trust or Duty Support NPCs.
+    /// </summary>
+    private static bool IsInPlayerGroup()
+    {
+        try
+        {
+            var players = 0;
+            foreach (var member in Service.PartyList)
+            {
+                if (member.ContentId != 0)
+                    players++;
+            }
+
+            return players > 1;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private async Task<bool> LaunchDutyRunnerAsync()
     {
         if (Plugin.Config.FarmMode == Configuration.FarmModeTomestoneRelic)
@@ -3691,6 +3776,19 @@ public sealed class FarmController : IDisposable
             await Service.Framework.RunOnFrameworkThread(() => ApplyLevelingModeDutyPick(Plugin.Config));
 
         var runner = Plugin.Config.DutyRunner;
+
+        // ADS enters through Duty Support, which cannot take a party — in a group SealBreaker would
+        // open Duty Support for one character while the rest stood outside. Theseus checks the
+        // group itself and queues the party through the Duty Finder, so a grouped launch goes there.
+        var groupHandoff = runner == 1 && !InDuty() && IsInPlayerGroup();
+        if (groupHandoff)
+        {
+            runner = 2;
+            await LogAsync("Grouped — handing duty entry to Theseus (Duty Support cannot take a party)");
+        }
+
+        _launchRunner = runner;
+
         if (runner == 0 && !IpcManager.AutoDutyAvailable)
         {
             var msg = IpcManager.AutoDutyPluginLoaded
@@ -3704,6 +3802,53 @@ public sealed class FarmController : IDisposable
         {
             await SetErrorAsync("ADS IPC not available — install/update McVaxius ADS");
             return false;
+        }
+
+        if (runner == 2)
+        {
+            if (!IpcManager.TheseusAvailable)
+            {
+                await SetErrorAsync(IpcManager.TheseusPluginLoaded
+                    ? "Theseus is loaded but its IPC is not ready — reload Theseus"
+                    : groupHandoff
+                        ? "Grouped runs need Theseus to queue the party — install or load Theseus"
+                        : "Theseus plugin is not loaded");
+                return false;
+            }
+
+            _adsNeedsStartInside = false;
+
+            // A handed-off ADS launch keeps the duty picked for ADS; otherwise the Theseus picker's.
+            var (theseusCfc, theseusName) = groupHandoff
+                ? (DutySupportCatalog.SelectedOrDefault(Plugin.Config).ContentFinderConditionId,
+                   DutySupportCatalog.SelectedOrDefault(Plugin.Config).Name)
+                : Plugin.Config.FarmMode == Configuration.FarmModeMoogle
+                    ? (AutoDutyCatalog.MoogleSelectedOrDefault(Plugin.Config).ContentFinderConditionId,
+                       AutoDutyCatalog.MoogleSelectedOrDefault(Plugin.Config).Name)
+                    : (AutoDutyCatalog.SelectedOrDefault(Plugin.Config).ContentFinderConditionId,
+                       AutoDutyCatalog.SelectedOrDefault(Plugin.Config).Name);
+
+            if (theseusCfc == 0)
+            {
+                await SetErrorAsync($"Content finder ID for {theseusName} was not detected — reload in game and reselect the duty");
+                return false;
+            }
+
+            if (!IpcManager.TheseusCanEnterDuty())
+            {
+                // Busy or refusing right now — retry on the next tick like the AutoDuty cooldown.
+                StatusQuiet("Waiting for Theseus to be ready...");
+                return false;
+            }
+
+            if (!IpcManager.TheseusEnterDuty(theseusCfc))
+            {
+                await SetErrorAsync($"Theseus refused to enter {theseusName} — check Theseus's log");
+                return false;
+            }
+
+            await LogAsync($"Theseus run started: {theseusName}");
+            return true;
         }
 
         if (runner == 0)
@@ -3789,9 +3934,13 @@ public sealed class FarmController : IDisposable
             return;
         }
 
-        if (cfg.DutyRunner == 0)
+        if (cfg.DutyRunner != 1)
         {
-            var best = DutyAutoPicker.PickBestAutoDuty(cfg, level, ilvl, IpcManager.AutoDutyContentHasPath);
+            // Theseus has no path query yet — treat every dungeon as runnable for its picker.
+            var hasPath = cfg.DutyRunner == 0
+                ? IpcManager.AutoDutyContentHasPath
+                : (Func<uint, bool>)(_ => true);
+            var best = DutyAutoPicker.PickBestAutoDuty(cfg, level, ilvl, hasPath);
             if (best == null)
             {
                 Log("WARN: Leveling mode found no eligible AutoDuty dungeon — keeping the current selection");
@@ -4009,15 +4158,30 @@ public sealed class FarmController : IDisposable
         return module != null && module->IsUpdating;
     }
 
+    private DateTime? _autoDutyBusyWaitSince;
+
     private bool TryPrepareAutoDutyRun()
     {
         if (!IpcManager.AutoDutyIsStopped())
         {
             _autoDutyStoppedAt = DateTime.MinValue;
+
+            // We're at a launch boundary outside any duty — AutoDuty has no legitimate reason
+            // to stay "running" here. Stale state (an aborted queue, a lockout) wedged the farm
+            // for good before; force it idle after a grace instead of waiting forever.
+            _autoDutyBusyWaitSince ??= DateTime.Now;
+            if (DateTime.Now - _autoDutyBusyWaitSince.Value > TimeSpan.FromSeconds(30) && !InDuty())
+            {
+                Log("WARN: AutoDuty stuck 'running' outside a duty for 30s — forcing it to stop");
+                IpcManager.AutoDutyStop();
+                _autoDutyBusyWaitSince = DateTime.Now; // re-arm; give the stop time to land
+            }
+
             StatusQuiet("Waiting for AutoDuty to finish previous state...");
             return false;
         }
 
+        _autoDutyBusyWaitSince = null;
         RecordAutoDutyStopped();
 
         var cooldownRemaining = TimeSpan.FromSeconds(2) - (DateTime.Now - _autoDutyStoppedAt);
@@ -4197,7 +4361,7 @@ public sealed class FarmController : IDisposable
 
     private void RefreshAdsCombatAutomationIfNeeded(bool force = false)
     {
-        if (Plugin.Config.DutyRunner != 1)
+        if (ActiveRunner != 1)
             return;
 
         var now = DateTime.UtcNow;
@@ -4278,16 +4442,24 @@ public sealed class FarmController : IDisposable
 
     private void StopDutyRunner()
     {
-        if (Plugin.Config.DutyRunner == 0)
+        var runner = ActiveRunner;
+        _launchRunner = -1;
+        switch (runner)
         {
-            if (!IpcManager.AutoDutyIsStopped())
-                IpcManager.AutoDutyStop();
-            else
-                RecordAutoDutyStopped();
-        }
-        else
-        {
-            IpcManager.AdsStop();
+            case 0:
+                if (!IpcManager.AutoDutyIsStopped())
+                    IpcManager.AutoDutyStop();
+                else
+                    RecordAutoDutyStopped();
+                break;
+            case 1:
+                IpcManager.AdsStop();
+                break;
+            default:
+                // Theseus has no Stop IPC yet — its run winds down on its own.
+                if (IpcManager.TheseusIsBusy())
+                    Log("Theseus has no stop IPC yet — its current run will finish on its own");
+                break;
         }
     }
 
@@ -6762,18 +6934,55 @@ public sealed class FarmController : IDisposable
     private DateTime? _memberDutyCompletedAt;
     private TimeSpan _memberLeaveGrace = TimeSpan.FromSeconds(5);
     private bool _memberHoldActive;
+    private string _memberHoldReason = "repairing";
     private DateTime _memberHoldLastSent = DateTime.MinValue;
     private DateTime _moogleLeaveLastSent = DateTime.MinValue;
+    private DateTime _moogleDutyCompletedAt = DateTime.MinValue;
+    private DateTime? _dutyNotStartedSince;
+
+    /// <summary>The moogle farm's end-of-duty signal. Primary: the DutyCompleted event. Secondary:
+    /// the live IsDutyStarted property — no event to miss — going 60s without the duty being
+    /// "started" while we're inside. That covers a missed completion event, a farm started inside
+    /// an already-cleared duty, and a wiped run nobody recommences; leaving is the recovery for
+    /// all three. Never true mid-fight: IsDutyStarted is true the whole pull.</summary>
+    private bool MoogleDutyLooksEnded()
+    {
+        if (_dutyCompletedSeen)
+            return true;
+
+        if (Service.DutyState.IsDutyStarted)
+        {
+            _dutyNotStartedSince = null;
+            return false;
+        }
+
+        _dutyNotStartedSince ??= DateTime.Now;
+        return DateTime.Now - _dutyNotStartedSince.Value > TimeSpan.FromSeconds(60);
+    }
+    private DateTime? _moogleAllClearSince;
+    private bool _moogleGroupReadyThisCycle;
 
     /// <summary>Leave the completed trial: leader broadcasts Charon's fleet leave-duty frame so
     /// every member's Charon walks out (with its own trust gates and stagger), then leaves locally
     /// — the relay never delivers a publisher's own frame back. Retried every 5s while inside.</summary>
     private void MoogleLeaveDutyTick(Configuration cfg)
     {
+        // Short grace after the clear so loot rolls and AutoDuty's own wrap-up get a chance.
+        if (DateTime.Now - _moogleDutyCompletedAt < TimeSpan.FromSeconds(6))
+            return;
+
         if (DateTime.Now - _moogleLeaveLastSent < TimeSpan.FromSeconds(5))
             return;
 
         _moogleLeaveLastSent = DateTime.Now;
+
+        // AutoDuty may still be "running", waiting for a trial exit that doesn't exist —
+        // stop it before leaving so it can't fight the teleport out.
+        if (!IpcManager.AutoDutyIsStopped())
+        {
+            Log("Duty complete — stopping AutoDuty before leaving");
+            IpcManager.AutoDutyStop();
+        }
 
         if (cfg.MoogleGroupRole == Configuration.MoogleRoleLeader)
         {
@@ -6965,11 +7174,12 @@ public sealed class FarmController : IDisposable
             return;
 
         IpcManager.DaedalusRelayPublish(RepairHoldRelay.Channel,
-            RepairHoldRelay.Encode(RepairHoldRelay.ActHold, name, "repairing"));
+            RepairHoldRelay.Encode(RepairHoldRelay.ActHold, name, _memberHoldReason));
     }
 
-    private void SetMemberHold(bool active)
+    private void SetMemberHold(bool active, string reason = "repairing")
     {
+        _memberHoldReason = reason;
         if (_memberHoldActive == active)
             return;
 
@@ -6977,7 +7187,7 @@ public sealed class FarmController : IDisposable
         if (active)
         {
             _memberHoldLastSent = DateTime.MinValue; // broadcast on the very next tick
-            Log("Broadcasting repair hold to the group");
+            Log($"Broadcasting hold to the group ({reason})");
             return;
         }
 

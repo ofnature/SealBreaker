@@ -168,7 +168,7 @@ public class Configuration : IPluginConfiguration
     /// (Charon IPC when available, otherwise the game's Equip Recommended).</summary>
     public bool AutoEquipUpgrades { get; set; } = true;
 
-    /// <summary>0 = AutoDuty, 1 = ADS (AI Duty Solver)</summary>
+    /// <summary>0 = AutoDuty, 1 = ADS (AI Duty Solver), 2 = Theseus (fleet runner, early).</summary>
     public int DutyRunner { get; set; } = 0;
 
     public const int AutoDutyModeKeep = 0;

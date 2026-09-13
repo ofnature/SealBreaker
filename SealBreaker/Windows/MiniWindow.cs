@@ -43,9 +43,9 @@ public sealed class MiniWindow : Window
         ImGui.SameLine(0, 5);
         ImGui.TextColored(stateColor, stateLabel);
         ImGui.SameLine(0, 8);
-        var dutyName = cfg.DutyRunner == 0
-            ? AutoDutyCatalog.SelectedOrDefault(cfg).Name
-            : DutySupportCatalog.SelectedOrDefault(cfg).Name;
+        var dutyName = cfg.DutyRunner == 1
+            ? DutySupportCatalog.SelectedOrDefault(cfg).Name
+            : AutoDutyCatalog.SelectedOrDefault(cfg).Name;
         ImGui.TextColored(UiTheme.TextBright, dutyName);
 
         if (ctrl.IsRunning)
@@ -73,9 +73,12 @@ public sealed class MiniWindow : Window
 
         ImGui.Spacing();
 
-        var dutyReady = cfg.DutyRunner == 0
-            ? IpcManager.AutoDutyAvailable
-            : IpcManager.AdsAvailable;
+        var dutyReady = cfg.DutyRunner switch
+        {
+            1 => IpcManager.AdsAvailable,
+            2 => IpcManager.TheseusAvailable,
+            _ => IpcManager.AutoDutyAvailable,
+        };
         var allReady = dutyReady && IpcManager.VnavAvailable && IpcManager.LifestreamAvailable;
 
         var buttonSize = new Vector2(70, 23);

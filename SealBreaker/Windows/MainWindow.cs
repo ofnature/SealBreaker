@@ -231,15 +231,18 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TextColored(col, label);
 
         ImGui.SameLine(0, 8);
-        var dutyName = cfg.DutyRunner == 0
-            ? AutoDutyCatalog.SelectedOrDefault(cfg).Name
-            : DutySupportCatalog.SelectedOrDefault(cfg).Name;
+        var dutyName = cfg.DutyRunner == 1
+            ? DutySupportCatalog.SelectedOrDefault(cfg).Name
+            : AutoDutyCatalog.SelectedOrDefault(cfg).Name;
         ImGui.TextColored(UiTheme.TextBright, dutyName);
 
         ImGui.SameLine(0, 8);
-        var runnerLabel = cfg.DutyRunner == 0
-            ? cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty"
-            : "ADS";
+        var runnerLabel = cfg.DutyRunner switch
+        {
+            1 => "ADS",
+            2 => "Theseus",
+            _ => cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty",
+        };
         ImGui.TextColored(UiTheme.Gray, runnerLabel);
 
         if (ctrl.IsRunning && !ctrl.IsAnyTestMode)
@@ -268,7 +271,12 @@ public sealed class MainWindow : Window, IDisposable
         }
         else
         {
-            var dutyReady = cfg.DutyRunner == 0 ? IpcManager.AutoDutyAvailable : IpcManager.AdsAvailable;
+            var dutyReady = cfg.DutyRunner switch
+            {
+                1 => IpcManager.AdsAvailable,
+                2 => IpcManager.TheseusAvailable,
+                _ => IpcManager.AutoDutyAvailable,
+            };
             var allReady = dutyReady && IpcManager.VnavAvailable && IpcManager.LifestreamAvailable;
             if (!allReady) ImGui.BeginDisabled();
             if (UiTheme.StartButton("Start##hdr", new Vector2(headerButtonWidth, 22))) ctrl.Start();
@@ -887,13 +895,15 @@ public sealed class MainWindow : Window, IDisposable
             var selected = duties.FirstOrDefault(d =>
                     d.ContentFinderConditionId != 0 && d.ContentFinderConditionId == cfg.MoogleDutyCfcId)
                 ?? duties.FirstOrDefault(d => d.TerritoryType == cfg.MoogleDutyTerritory);
-            EnsureAdPathCache(duties);
+            if (cfg.DutyRunner == 0)
+                EnsureAdPathCache(duties);
 
             var filtered = DrawExpansionFilter(
                 "moogle", duties, selected?.Expansion ?? 0,
                 d => d.Expansion, d => d.ExpansionName, ref _moogleExpansionFilter);
 
-            if (_adPathCache != null)
+            // Path-hiding is AutoDuty-runner-only — Theseus has no path query.
+            if (cfg.DutyRunner == 0 && _adPathCache != null)
             {
                 var withPath = filtered.Where(d => AutoDutyHasPathCached(d.TerritoryType)).ToList();
                 var hidden = filtered.Count - withPath.Count;
@@ -1660,8 +1670,8 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawDutySection(Configuration cfg)
     {
-        var runnerItems = new[] { "AutoDuty", "ADS (AI Duty Solver)" };
-        var runner = cfg.DutyRunner;
+        var runnerItems = new[] { "AutoDuty", "ADS (AI Duty Solver)", "Theseus (fleet runner, early)" };
+        var runner = Math.Clamp(cfg.DutyRunner, 0, runnerItems.Length - 1);
         ImGui.SetNextItemWidth(240);
         if (ImGui.Combo("Duty runner", ref runner, runnerItems, runnerItems.Length))
         {
@@ -1670,14 +1680,22 @@ public sealed class MainWindow : Window, IDisposable
             IpcManager.ResetDutyRunners();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Select which plugin handles dungeon automation.");
+            ImGui.SetTooltip("Select which plugin handles dungeon automation.\nTheseus is the fleet runner (every character paths itself) — early development;\nit has no stop or path-availability IPC yet, so use it only where it has routes.");
+
+        if (cfg.DutyRunner == 2)
+        {
+            if (IpcManager.TheseusAvailable)
+                UiTheme.Chip(FontAwesomeIcon.Check, "Theseus IPC connected", UiTheme.Teal);
+            else
+                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Theseus not detected", UiTheme.Yellow);
+        }
 
         ImGui.Spacing();
 
-        if (cfg.DutyRunner == 0)
-            DrawAutoDutyDutySection(cfg);
-        else
+        if (cfg.DutyRunner == 1)
             DrawAdsDutySupportSection(cfg);
+        else
+            DrawAutoDutyDutySection(cfg);
     }
 
     private static void DrawGeneralSection(Configuration cfg)
@@ -2000,7 +2018,8 @@ public sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        var best = DutyAutoPicker.PickBestAutoDuty(cfg, _cachedLevel, _cachedIlvl, AutoDutyHasPathCached);
+        var best = DutyAutoPicker.PickBestAutoDuty(cfg, _cachedLevel, _cachedIlvl,
+            cfg.DutyRunner == 0 ? AutoDutyHasPathCached : _ => true);
         if (best == null)
         {
             _autoPickNote = "no eligible dungeon found";
@@ -2092,14 +2111,16 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.TextColored(UiTheme.Teal, "Leveling mode is on — the dungeon below re-picks automatically before each run.");
 
         var selected = AutoDutyCatalog.SelectedOrDefault(cfg);
-        EnsureAdPathCache(duties);
+        if (cfg.DutyRunner == 0)
+            EnsureAdPathCache(duties);
 
         var filtered = DrawExpansionFilter(
             "ad", duties, selected.Expansion,
             d => d.Expansion, d => d.ExpansionName, ref _adExpansionFilter);
 
         // Hide dungeons AutoDuty has no path for — it cannot run them anyway.
-        if (_adPathCache != null)
+        // (Theseus has no path query, so nothing is hidden for it.)
+        if (cfg.DutyRunner == 0 && _adPathCache != null)
         {
             var withPath = filtered.Where(d => AutoDutyHasPathCached(d.TerritoryType)).ToList();
             var hidden = filtered.Count - withPath.Count;
@@ -2229,7 +2250,9 @@ public sealed class MainWindow : Window, IDisposable
             UiTheme.SectionTitle("Step 1 — Required plugins");
             DrawPluginStatus("vnavmesh", IpcManager.VnavAvailable);
             DrawPluginStatus("Lifestream", IpcManager.LifestreamAvailable);
-            DrawPluginStatus(cfg.DutyRunner == 0 ? "AutoDuty" : "ADS", cfg.DutyRunner == 0 ? IpcManager.AutoDutyAvailable : IpcManager.AdsAvailable);
+            DrawPluginStatus(
+                cfg.DutyRunner switch { 1 => "ADS", 2 => "Theseus", _ => "AutoDuty" },
+                cfg.DutyRunner switch { 1 => IpcManager.AdsAvailable, 2 => IpcManager.TheseusAvailable, _ => IpcManager.AutoDutyAvailable });
         }
 
         using (UiTheme.Card())
@@ -2721,12 +2744,15 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.TextColored(col, label);
 
             ImGui.SameLine(0, 8);
-            var dutyName = cfg.DutyRunner == 0
-                ? AutoDutyCatalog.SelectedOrDefault(cfg).Name
-                : DutySupportCatalog.SelectedOrDefault(cfg).Name;
-            var runnerLabel = cfg.DutyRunner == 0
-                ? cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty"
-                : "ADS · Duty Support";
+            var dutyName = cfg.DutyRunner == 1
+                ? DutySupportCatalog.SelectedOrDefault(cfg).Name
+                : AutoDutyCatalog.SelectedOrDefault(cfg).Name;
+            var runnerLabel = cfg.DutyRunner switch
+            {
+                1 => "ADS · Duty Support",
+                2 => "Theseus",
+                _ => cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty",
+            };
             ImGui.TextColored(UiTheme.TextBright, dutyName);
             ImGui.SameLine(0, 8);
             ImGui.TextColored(UiTheme.Gray, runnerLabel);
@@ -3208,9 +3234,12 @@ public sealed class MainWindow : Window, IDisposable
         DrawGrandCompanyLine(cfg);
         ImGui.Spacing();
 
-        var dutyReady = cfg.DutyRunner == 0
-            ? IpcManager.AutoDutyAvailable
-            : IpcManager.AdsAvailable;
+        var dutyReady = cfg.DutyRunner switch
+        {
+            1 => IpcManager.AdsAvailable,
+            2 => IpcManager.TheseusAvailable,
+            _ => IpcManager.AutoDutyAvailable,
+        };
 
         var allReady = dutyReady
                     && IpcManager.VnavAvailable

@@ -635,6 +635,93 @@ internal static class IpcManager
         }
     }
 
+    // ── Theseus (fleet duty runner, early development) ────────
+    //   Theseus.IsBusy        Func<bool>       — true while a run is driving the character
+    //   Theseus.EnterDuty     Func<uint, bool> — begin entering/running a duty by CFC id
+    //   Theseus.CanEnterDuty  Func<bool>       — entry possible right now
+    //   No Stop gate yet, and no path/route query — callers must tolerate both.
+
+    private const string TheseusPluginInternalName = "Theseus";
+
+    private static ICallGateSubscriber<bool>? _theseusIsBusy;
+    private static ICallGateSubscriber<uint, bool>? _theseusEnterDuty;
+    private static ICallGateSubscriber<bool>? _theseusCanEnterDuty;
+
+    public static bool TheseusPluginLoaded => IsPluginLoaded(TheseusPluginInternalName);
+
+    public static bool TheseusAvailable
+    {
+        get
+        {
+            if (!TheseusPluginLoaded)
+                return false;
+
+            RefreshTheseusSubscribers();
+            return (_theseusIsBusy?.HasFunction ?? false)
+                && (_theseusEnterDuty?.HasFunction ?? false);
+        }
+    }
+
+    private static void RefreshTheseusSubscribers()
+    {
+        if (_theseusIsBusy is { HasFunction: false })
+            _theseusIsBusy = null;
+        if (_theseusEnterDuty is { HasFunction: false })
+            _theseusEnterDuty = null;
+        if (_theseusCanEnterDuty is { HasFunction: false })
+            _theseusCanEnterDuty = null;
+
+        try
+        {
+            _theseusIsBusy ??= Service.PluginInterface.GetIpcSubscriber<bool>("Theseus.IsBusy");
+            _theseusEnterDuty ??= Service.PluginInterface.GetIpcSubscriber<uint, bool>("Theseus.EnterDuty");
+            _theseusCanEnterDuty ??= Service.PluginInterface.GetIpcSubscriber<bool>("Theseus.CanEnterDuty");
+        }
+        catch
+        {
+            // Availability is checked via HasFunction per call.
+        }
+    }
+
+    /// <summary>False when the gate is missing — a missing Theseus reads as idle (its own contract).</summary>
+    public static bool TheseusIsBusy()
+    {
+        RefreshTheseusSubscribers();
+        if (_theseusIsBusy is not { HasFunction: true })
+            return false;
+
+        try { return _theseusIsBusy.InvokeFunc(); }
+        catch (IpcNotReadyError) { _theseusIsBusy = null; return false; }
+        catch { return false; }
+    }
+
+    public static bool TheseusCanEnterDuty()
+    {
+        RefreshTheseusSubscribers();
+        if (_theseusCanEnterDuty is not { HasFunction: true })
+            return false;
+
+        try { return _theseusCanEnterDuty.InvokeFunc(); }
+        catch (IpcNotReadyError) { _theseusCanEnterDuty = null; return false; }
+        catch { return false; }
+    }
+
+    /// <summary>True when the entry began; Theseus logs its own refusal reason.</summary>
+    public static bool TheseusEnterDuty(uint contentFinderConditionId)
+    {
+        RefreshTheseusSubscribers();
+        if (_theseusEnterDuty is not { HasFunction: true })
+            return false;
+
+        try { return _theseusEnterDuty.InvokeFunc(contentFinderConditionId); }
+        catch (IpcNotReadyError) { _theseusEnterDuty = null; return false; }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Warning(ex, "Theseus.EnterDuty IPC failed");
+            return false;
+        }
+    }
+
     // ── Daedalus LAN relay (cross-machine channel bus) ────────
     //   Daedalus.Relay.Publish       Action<string channel, string json> — broadcast to every OTHER
     //                                client (LAN + same-machine siblings). The publisher never
@@ -1283,6 +1370,9 @@ internal static class IpcManager
         _adsResumeDutyFromInside = null;
         _adsLeaveDuty            = null;
         _adsGetStatusJson        = null;
+        _theseusIsBusy       = null;
+        _theseusEnterDuty    = null;
+        _theseusCanEnterDuty = null;
     }
 
     /// <summary>Clears all cached IPC subscribers so they re-resolve on next use.</summary>
