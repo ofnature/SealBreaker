@@ -1700,6 +1700,28 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawGeneralSection(Configuration cfg)
     {
+        var movementItems = new[] { "vnavmesh", "Ariadne" };
+        var movement = Math.Clamp(cfg.MovementProvider, 0, movementItems.Length - 1);
+        ImGui.SetNextItemWidth(200);
+        if (ImGui.Combo("Movement plugin", ref movement, movementItems, movementItems.Length))
+        {
+            cfg.MovementProvider = movement;
+            cfg.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Which plugin drives all overworld movement — GC walks, repair trips, relic detours.\nAriadne is the suite's Mnemosyne-backed pathfinder; vnavmesh is the default.\nTakes effect immediately; the readiness chips follow the choice.");
+
+        if (cfg.MovementProvider == Configuration.MovementProviderAriadne)
+        {
+            ImGui.SameLine();
+            if (IpcManager.VnavAvailable)
+                UiTheme.Chip(FontAwesomeIcon.Check, "Ariadne connected", UiTheme.Teal);
+            else
+                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Ariadne not detected", UiTheme.Yellow);
+        }
+
+        ImGui.Spacing();
+
         var showWindowBanner = cfg.ShowWindowBanner;
         if (ImGui.Checkbox("Show window banner", ref showWindowBanner))
         {
@@ -2100,7 +2122,9 @@ public sealed class MainWindow : Window, IDisposable
     private static void DrawAutoDutyDutySection(Configuration cfg)
     {
         AutoDutyCatalog.EnsureInitialized();
-        var duties = AutoDutyCatalog.Duties.ToList();
+        // Trials included (e.g. the Porta Decumana): AutoDuty hides those it has no path for,
+        // and NPC-party duty modes gray them out since trials have no Duty Support.
+        var duties = AutoDutyCatalog.DutiesWithTrials.ToList();
         if (duties.Count == 0)
         {
             ImGui.TextColored(ColYellow, "No dungeons found in game data.");
@@ -2133,16 +2157,19 @@ public sealed class MainWindow : Window, IDisposable
         var selectedIndex = filtered.FindIndex(d =>
             d.ContentFinderConditionId == selected.ContentFinderConditionId
             && d.TerritoryType == selected.TerritoryType);
-        var labels = filtered.Select(AutoDutyCatalog.FormatLabel).ToArray();
+        var labels = filtered
+            .Select(d => AutoDutyCatalog.FormatLabel(d)
+                + (d.ContentTypeId == AutoDutyCatalog.ContentTypeTrial ? " [Trial]" : ""))
+            .ToArray();
         var needsNpcParty = cfg.AutoDutyDutyMode
             is not (Configuration.AutoDutyModeRegular or Configuration.AutoDutyModeSquadron);
         var picked = DrawDungeonCombo("Dungeon", labels, selectedIndex,
             i => (filtered[i].RequiredLevel, filtered[i].RequiredItemLevel, filtered[i].InstanceContentId,
-                  !needsNpcParty || filtered[i].HasDutySupport));
+                  cfg.DutyRunner == 2 || !needsNpcParty || filtered[i].HasDutySupport));
         if (picked >= 0)
             AutoDutyCatalog.ApplySelection(cfg, filtered[picked]);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("AutoDuty runs this dungeon each cycle. Dungeons without an AutoDuty path are hidden;\ngrayed entries are above your level or item level.");
+            ImGui.SetTooltip("The duty runner farms this each cycle — trials included (Regular mode; no Duty Support).\nDuties without an AutoDuty path are hidden; grayed entries are above your level or item level.");
 
         if (ImGui.Button("Auto-pick best dungeon"))
         {
@@ -2248,7 +2275,7 @@ public sealed class MainWindow : Window, IDisposable
         using (UiTheme.Card())
         {
             UiTheme.SectionTitle("Step 1 — Required plugins");
-            DrawPluginStatus("vnavmesh", IpcManager.VnavAvailable);
+            DrawPluginStatus(cfg.MovementProvider == Configuration.MovementProviderAriadne ? "Ariadne" : "vnavmesh", IpcManager.VnavAvailable);
             DrawPluginStatus("Lifestream", IpcManager.LifestreamAvailable);
             DrawPluginStatus(
                 cfg.DutyRunner switch { 1 => "ADS", 2 => "Theseus", _ => "AutoDuty" },
@@ -3369,7 +3396,7 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.SameLine(0, 14);
         UiTheme.Chip(
             IpcManager.VnavAvailable ? FontAwesomeIcon.Check : FontAwesomeIcon.Times,
-            "vnavmesh",
+            cfg.MovementProvider == Configuration.MovementProviderAriadne ? "Ariadne" : "vnavmesh",
             IpcManager.VnavAvailable ? UiTheme.Green : UiTheme.Red);
 
         ImGui.SameLine(0, 14);

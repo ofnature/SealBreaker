@@ -819,7 +819,14 @@ internal static class IpcManager
         catch { return null; }
     }
 
-    // ── vnavmesh ──────────────────────────────────────────────
+    // ── Movement provider: vnavmesh OR Ariadne ────────────────
+    // Configuration.MovementProvider picks which plugin's gates these fields bind to.
+    // Ariadne mirrors vnavmesh's SimpleMove./Path. shapes exactly; the one difference is
+    // readiness (Ariadne.IsConnected + Ariadne.ZoneStatus instead of Nav.IsReady). The
+    // Vnav* method names are kept — ~50 call sites treat them as "the movement plugin".
+    private static int _movementBoundProvider = -1;
+    private static ICallGateSubscriber<int>? _ariadneZoneStatus;
+
     private static ICallGateSubscriber<Vector3, bool, bool>? _vnavPathfind;
     private static ICallGateSubscriber<Vector3, bool, float, bool>? _vnavPathfindClose;
     private static ICallGateSubscriber<bool>?                _vnavIsReady;
@@ -842,6 +849,21 @@ internal static class IpcManager
 
     private static void RefreshVnavSubscribers()
     {
+        // Rebind every gate when the user switches movement plugins.
+        if (Plugin.Config.MovementProvider != _movementBoundProvider)
+        {
+            _movementBoundProvider = Plugin.Config.MovementProvider;
+            _vnavPathfind = null;
+            _vnavPathfindClose = null;
+            _vnavIsReady = null;
+            _vnavPathfindInProgress = null;
+            _vnavPathIsRunning = null;
+            _vnavStop = null;
+            _vnavSetTolerance = null;
+            _vnavNumWaypoints = null;
+            _ariadneZoneStatus = null;
+        }
+
         if (_vnavPathfind is { HasFunction: false })
             _vnavPathfind = null;
         if (_vnavPathfindClose is { HasFunction: false })
@@ -866,14 +888,20 @@ internal static class IpcManager
     {
         try
         {
-            _vnavPathfind ??= Service.PluginInterface.GetIpcSubscriber<Vector3, bool, bool>("vnavmesh.SimpleMove.PathfindAndMoveTo");
-            _vnavPathfindClose ??= Service.PluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
-            _vnavIsReady  ??= Service.PluginInterface.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
-            _vnavPathfindInProgress ??= Service.PluginInterface.GetIpcSubscriber<bool>("vnavmesh.SimpleMove.PathfindInProgress");
-            _vnavPathIsRunning ??= Service.PluginInterface.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning");
-            _vnavStop     ??= Service.PluginInterface.GetIpcSubscriber<object>("vnavmesh.Path.Stop");
-            _vnavSetTolerance ??= Service.PluginInterface.GetIpcSubscriber<float, object>("vnavmesh.Path.SetTolerance");
-            _vnavNumWaypoints ??= Service.PluginInterface.GetIpcSubscriber<int>("vnavmesh.Path.NumWaypoints");
+            var ariadne = Plugin.Config.MovementProvider == Configuration.MovementProviderAriadne;
+            var move = ariadne ? "Ariadne.SimpleMove." : "vnavmesh.SimpleMove.";
+            var path = ariadne ? "Ariadne.Path." : "vnavmesh.Path.";
+
+            _vnavPathfind ??= Service.PluginInterface.GetIpcSubscriber<Vector3, bool, bool>(move + "PathfindAndMoveTo");
+            _vnavPathfindClose ??= Service.PluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>(move + "PathfindAndMoveCloseTo");
+            _vnavIsReady  ??= Service.PluginInterface.GetIpcSubscriber<bool>(ariadne ? "Ariadne.IsConnected" : "vnavmesh.Nav.IsReady");
+            _vnavPathfindInProgress ??= Service.PluginInterface.GetIpcSubscriber<bool>(move + "PathfindInProgress");
+            _vnavPathIsRunning ??= Service.PluginInterface.GetIpcSubscriber<bool>(path + "IsRunning");
+            _vnavStop     ??= Service.PluginInterface.GetIpcSubscriber<object>(path + "Stop");
+            _vnavSetTolerance ??= Service.PluginInterface.GetIpcSubscriber<float, object>(path + "SetTolerance");
+            _vnavNumWaypoints ??= Service.PluginInterface.GetIpcSubscriber<int>(path + "NumWaypoints");
+            if (ariadne)
+                _ariadneZoneStatus ??= Service.PluginInterface.GetIpcSubscriber<int>("Ariadne.ZoneStatus");
         }
         catch
         {
@@ -1080,7 +1108,18 @@ internal static class IpcManager
 
     private static bool VnavIsReadyCore()
     {
-        try { return _vnavIsReady?.InvokeFunc() ?? false; }
+        try
+        {
+            if (!(_vnavIsReady?.InvokeFunc() ?? false))
+                return false;
+
+            if (_movementBoundProvider != Configuration.MovementProviderAriadne)
+                return true;
+
+            // Ariadne has no Nav.IsReady twin: ready = connected AND the zone answerable
+            // (ZoneStatus 2 = local current mesh, 3 = Mnemosyne cached).
+            return (_ariadneZoneStatus?.InvokeFunc() ?? 0) is 2 or 3;
+        }
         catch { return false; }
     }
 
@@ -1389,6 +1428,8 @@ internal static class IpcManager
         _daedalusRelayPublish = null;
         _daedalusRelayMessage = null;
         _daedalusTrustList = null;
+        _movementBoundProvider = -1;
+        _ariadneZoneStatus = null;
         _vnavPathfind      = null;
         _vnavPathfindClose = null;
         _vnavIsReady       = null;

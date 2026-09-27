@@ -453,7 +453,7 @@ public sealed class FarmController : IDisposable
         _memberWasInDuty = false; _memberHoldActive = false; _memberExitSettleAt = null;
         _memberDutyCompletedAt = null; _moogleLeaveLastSent = DateTime.MinValue; _dutyCompletedSeen = false;
         _moogleAllClearSince = null; _moogleGroupReadyThisCycle = false; _dutyNotStartedSince = null;
-        _autoDutyBusyWaitSince = null;
+        _autoDutyBusyWaitSince = null; _theseusNotReadySince = null; _preDutyCheckLogged = false;
         lock (_repairHolds) _repairHolds.Clear();
         _tomeRunSnapshot.Clear();
         if (Plugin.Config.FarmMode == Configuration.FarmModeMoogle)
@@ -915,6 +915,7 @@ public sealed class FarmController : IDisposable
                     _cycleCounted = false;
                     _levelingRotationDoneThisCycle = false;
                     _moogleGroupReadyThisCycle = false;
+                    _preDutyCheckLogged = false;
                     // The game's DutyStarted event fires only once the fight actually begins —
                     // never carry the PREVIOUS run's completion into this one, or the leave
                     // logic fires during the entry barrier and boots us out of the fresh duty.
@@ -3836,11 +3837,22 @@ public sealed class FarmController : IDisposable
 
             if (!IpcManager.TheseusCanEnterDuty())
             {
-                // Busy or refusing right now — retry on the next tick like the AutoDuty cooldown.
+                // Not ready — retry slowly (this whole launch path re-runs when we return false,
+                // so an unthrottled retry spams the log at tick speed), and give up eventually.
+                _theseusNotReadySince ??= DateTime.Now;
+                if (DateTime.Now - _theseusNotReadySince.Value > TimeSpan.FromSeconds(30))
+                {
+                    _theseusNotReadySince = null;
+                    await SetErrorAsync("Theseus refused to start for 30s (CanEnterDuty false) — check that its run engine is enabled");
+                    return false;
+                }
+
                 StatusQuiet("Waiting for Theseus to be ready...");
+                await Task.Delay(1500);
                 return false;
             }
 
+            _theseusNotReadySince = null;
             if (!IpcManager.TheseusEnterDuty(theseusCfc))
             {
                 await SetErrorAsync($"Theseus refused to enter {theseusName} — check Theseus's log");
@@ -4159,6 +4171,8 @@ public sealed class FarmController : IDisposable
     }
 
     private DateTime? _autoDutyBusyWaitSince;
+    private DateTime? _theseusNotReadySince;
+    private bool _preDutyCheckLogged;
 
     private bool TryPrepareAutoDutyRun()
     {
@@ -4424,6 +4438,12 @@ public sealed class FarmController : IDisposable
 
     private void LogPreDutyGearCheck()
     {
+        // StartDuty re-enters every tick while a launch is pending (runner cooldowns, Theseus
+        // waits) — this line is once per cycle boundary, not once per attempt.
+        if (_preDutyCheckLogged)
+            return;
+
+        _preDutyCheckLogged = true;
         var cfg = Plugin.Config;
         var town = cfg.TownNav(cfg.GrandCompanyIndex);
         var condition = GetMinEquippedConditionPercent();

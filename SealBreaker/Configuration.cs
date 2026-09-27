@@ -171,6 +171,13 @@ public class Configuration : IPluginConfiguration
     /// <summary>0 = AutoDuty, 1 = ADS (AI Duty Solver), 2 = Theseus (fleet runner, early).</summary>
     public int DutyRunner { get; set; } = 0;
 
+    public const int MovementProviderVnavmesh = 0;
+    public const int MovementProviderAriadne = 1;
+
+    /// <summary>Which plugin drives all overworld movement (GC walks, repair, relic trips):
+    /// 0 = vnavmesh, 1 = Ariadne (Mnemosyne-backed pathfinding, near-identical IPC shapes).</summary>
+    public int MovementProvider { get; set; } = MovementProviderVnavmesh;
+
     public const int AutoDutyModeKeep = 0;
     public const int AutoDutyModeSupport = 1;
     public const int AutoDutyModeTrust = 2;

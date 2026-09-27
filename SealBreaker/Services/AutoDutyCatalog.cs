@@ -68,13 +68,15 @@ internal static class AutoDutyCatalog
     {
         EnsureInitialized();
 
-        var selected = _duties!.FirstOrDefault(d =>
+        // Search trials too: the Duty page can select them (e.g. the Porta Decumana), and a
+        // dungeons-only lookup would silently fall back to Mistwake at launch.
+        var selected = _dutiesWithTrials!.FirstOrDefault(d =>
             d.ContentFinderConditionId != 0
             && d.ContentFinderConditionId == cfg.AutoDutyContentFinderConditionId);
         if (selected != null)
             return selected;
 
-        selected = _duties!.FirstOrDefault(d => d.TerritoryType == cfg.AutoDutyTerritoryType);
+        selected = _dutiesWithTrials!.FirstOrDefault(d => d.TerritoryType == cfg.AutoDutyTerritoryType);
         if (selected != null)
             return selected;
 
