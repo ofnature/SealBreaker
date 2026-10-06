@@ -181,15 +181,6 @@ internal static class UiTheme
         ImGui.Dummy(new Vector2(size * 0.9f, size));
     }
 
-    /// <summary>Gray label over an enlarged value — one metric grid cell.</summary>
-    public static void MetricCell(string label, string value, Vector4? valueColor = null)
-    {
-        ImGui.TextColored(Gray, label);
-        ImGui.SetWindowFontScale(1.2f);
-        ImGui.TextColored(valueColor ?? TextBright, value);
-        ImGui.SetWindowFontScale(1f);
-    }
-
     public static void RightAlignedText(string text, Vector4 color)
     {
         var width = ImGui.CalcTextSize(text).X;
@@ -197,6 +188,148 @@ internal static class UiTheme
         if (avail > width)
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + avail - width);
         ImGui.TextColored(color, text);
+    }
+
+    // ── Banner shell pieces (header pill, stat tiles, panels, gauge) ──
+    public static readonly Vector4 GaugeBg = new(0.047f, 0.063f, 0.141f, 1f); // #0C1024
+
+    private static uint U32(Vector4 c) => ImGui.ColorConvertFloat4ToU32(c);
+
+    public static Vector2 PillSize(string text)
+    {
+        var textSize = ImGui.CalcTextSize(text);
+        return new Vector2(textSize.X + 30f, textSize.Y + 8f);
+    }
+
+    /// <summary>Rounded status pill (dot + label) tinted by the state colour, at a screen position.</summary>
+    public static void PillAt(Vector2 pos, string text, Vector4 color)
+    {
+        var size = PillSize(text);
+        var max = pos + size;
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddRectFilled(pos, max, U32(color with { W = 0.16f }), size.Y / 2f);
+        drawList.AddRect(pos, max, U32(color with { W = 0.55f }), size.Y / 2f);
+        drawList.AddCircleFilled(new Vector2(pos.X + 11f, pos.Y + size.Y / 2f), 3f, U32(color));
+        drawList.AddText(new Vector2(pos.X + 20f, pos.Y + 4f), U32(color), text);
+    }
+
+    public static float StatTileHeight => MathF.Round(ImGui.GetFontSize() * 2.07f + 23f);
+
+    /// <summary>One stat tile: small caps label, large value, optional dim sub-value, coloured
+    /// left stripe. Returns true while hovered so the caller can attach a tooltip.</summary>
+    public static bool StatTile(string label, string value, string? sub, float width, Vector4 stripe, Vector4? valueColor = null)
+    {
+        var pos = ImGui.GetCursorScreenPos();
+        var size = new Vector2(width, StatTileHeight);
+        var max = pos + size;
+        var drawList = ImGui.GetWindowDrawList();
+
+        drawList.AddRectFilled(pos, max, U32(CardBg), 6f);
+        drawList.AddRect(pos, max, U32(CardBorder), 6f);
+        drawList.AddRectFilled(pos, new Vector2(pos.X + 3f, max.Y), U32(stripe), 6f, ImDrawFlags.RoundCornersLeft);
+
+        var font = ImGui.GetFont();
+        var baseSize = ImGui.GetFontSize();
+        var smallSize = baseSize * 0.82f;
+        var valueSize = baseSize * 1.25f;
+
+        drawList.AddText(font, smallSize, new Vector2(pos.X + 11f, pos.Y + 8f), U32(Gray), label.ToUpperInvariant());
+
+        var valuePos = new Vector2(pos.X + 11f, max.Y - 9f - valueSize);
+        drawList.AddText(font, valueSize, valuePos, U32(valueColor ?? TextBright), value);
+
+        if (!string.IsNullOrEmpty(sub))
+        {
+            var valueWidth = ImGui.CalcTextSize(value).X * 1.25f;
+            drawList.AddText(font, smallSize,
+                new Vector2(valuePos.X + valueWidth + 6f, max.Y - 10f - smallSize), U32(Gray), sub);
+        }
+
+        ImGui.Dummy(size);
+        return ImGui.IsItemHovered();
+    }
+
+    /// <summary>Fixed-size card as a child window — use where cards sit side by side
+    /// (<see cref="Card"/> splits draw channels and cannot share a row or live in a table).</summary>
+    public static bool BeginPanel(string id, Vector2 size)
+    {
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, CardBg);
+        ImGui.PushStyleColor(ImGuiCol.Border, CardBorder);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(11, 9));
+        return ImGui.BeginChild(id, size, true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+    }
+
+    public static void EndPanel()
+    {
+        ImGui.EndChild();
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(2);
+    }
+
+    /// <summary>Small caps panel title with an optional right-aligned note.</summary>
+    public static void PanelTitle(string label, string? right = null, Vector4? rightColor = null)
+    {
+        var font = ImGui.GetFont();
+        var smallSize = ImGui.GetFontSize() * 0.82f;
+        var pos = ImGui.GetCursorScreenPos();
+        var avail = ImGui.GetContentRegionAvail().X;
+        var drawList = ImGui.GetWindowDrawList();
+        var caps = label.ToUpperInvariant();
+
+        drawList.AddText(font, smallSize, new Vector2(pos.X, pos.Y + 1f), U32(Gray), caps);
+
+        if (!string.IsNullOrEmpty(right))
+        {
+            var labelWidth = ImGui.CalcTextSize(caps).X * 0.82f;
+            var shown = Ellipsize(right, avail - labelWidth - 14f);
+            var width = ImGui.CalcTextSize(shown).X;
+            drawList.AddText(new Vector2(pos.X + avail - width, pos.Y - 1f), U32(rightColor ?? TextBright), shown);
+        }
+
+        ImGui.Dummy(new Vector2(0, ImGui.GetFontSize() + 3f));
+    }
+
+    /// <summary>Thin rounded progress gauge filling the available width.</summary>
+    public static void Gauge(float fraction, Vector4 from, Vector4 to, float height = 8f)
+    {
+        var pos = ImGui.GetCursorScreenPos();
+        var width = ImGui.GetContentRegionAvail().X;
+        var max = new Vector2(pos.X + width, pos.Y + height);
+        var drawList = ImGui.GetWindowDrawList();
+
+        drawList.AddRectFilled(pos, max, U32(GaugeBg), height / 2f);
+
+        var filled = Math.Clamp(fraction, 0f, 1f) * (width - 2f);
+        if (filled >= 1f)
+        {
+            drawList.AddRectFilledMultiColor(
+                new Vector2(pos.X + 1f, pos.Y + 1f), new Vector2(pos.X + 1f + filled, max.Y - 1f),
+                U32(from), U32(to), U32(to), U32(from));
+        }
+
+        drawList.AddRect(pos, max, U32(CardBorder), height / 2f);
+        ImGui.Dummy(new Vector2(width, height));
+    }
+
+    /// <summary>Cuts text to fit a pixel width, ending in "..." when it had to be cut.</summary>
+    public static string Ellipsize(string text, float maxWidth)
+    {
+        if (maxWidth <= 0f || string.IsNullOrEmpty(text) || ImGui.CalcTextSize(text).X <= maxWidth)
+            return text;
+
+        const string dots = "...";
+        var low = 0;
+        var high = text.Length;
+        while (low < high)
+        {
+            var mid = (low + high + 1) / 2;
+            if (ImGui.CalcTextSize(text[..mid] + dots).X <= maxWidth)
+                low = mid;
+            else
+                high = mid - 1;
+        }
+
+        return low == 0 ? dots : text[..low].TrimEnd() + dots;
     }
 
     // ── Buttons ───────────────────────────────────────────────

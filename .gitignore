@@ -11,3 +11,5 @@ obj/
 # Only README.md is tracked; all other markdown stays local
 *.md
 !README.md
+# UI mockups stay local
+sketches/

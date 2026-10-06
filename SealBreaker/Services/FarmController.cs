@@ -219,6 +219,42 @@ public sealed class FarmController : IDisposable
     public int TotalRunsTracked => _runClearTimes.Count;
     public int RunsThisCycle => _runsThisCycle;
 
+    /// <summary>Which leg of the loop the farm is on, for the Dashboard tracker. Listed in the
+    /// order the loop really runs them: extraction and repair happen at the cycle boundary,
+    /// before the next duty.</summary>
+    public enum LoopStage { None, Duty, Deliver, Buy, Extract, Repair }
+
+    public LoopStage CurrentLoopStage => State switch
+    {
+        FarmState.StartDuty or FarmState.WaitingForDutyStart or FarmState.WaitingForDutyComplete
+            or FarmState.WaitingForDutyExit or FarmState.OpenDutySupport or FarmState.QueueDutySupport
+            or FarmState.LevelingRotation or FarmState.MoogleHoldWait or FarmState.MoogleMemberWait
+            => LoopStage.Duty,
+
+        // The teleport and walk states are shared by every GC errand — the errand decides.
+        FarmState.TeleportToGC or FarmState.WaitingForZone or FarmState.CheckSubZone or FarmState.WaitingForSubZone
+            => StageForErrand(_gcNavFinalState),
+        FarmState.NavigateToGcTarget => StageForErrand(_gcNavNextState),
+
+        FarmState.NavigateToOfficer or FarmState.OpenExpertDelivery or FarmState.ProcessDelivery
+            => LoopStage.Deliver,
+        FarmState.NavigateToShop or FarmState.OpenGCShop or FarmState.BuyDuckbones or FarmState.CheckGcLoop
+            or FarmState.CheckTomeSpend or FarmState.SpendRelicTomes
+            => LoopStage.Buy,
+        FarmState.OpenMateriaExtraction or FarmState.ProcessMateriaExtraction => LoopStage.Extract,
+        FarmState.NavigateToRepair or FarmState.OpenRepairNpc or FarmState.OpenRepairMenu
+            or FarmState.ProcessRepair or FarmState.NavigateFromRepair
+            => LoopStage.Repair,
+        _ => LoopStage.None,
+    };
+
+    private static LoopStage StageForErrand(FarmState errand) => errand switch
+    {
+        FarmState.OpenGCShop or FarmState.NavigateToShop => LoopStage.Buy,
+        FarmState.NavigateToRepair or FarmState.OpenRepairNpc or FarmState.OpenRepairMenu => LoopStage.Repair,
+        _ => LoopStage.Deliver,
+    };
+
     private int   _runsThisCycle;
     private int   _pendingHandinRow = -1;
     private uint  _pendingHandinItemId;
@@ -1814,7 +1850,12 @@ public sealed class FarmController : IDisposable
         var moveDest = await Service.Framework.RunOnFrameworkThread(() =>
         {
             var player = Service.ObjectTable.LocalPlayer;
-            var walkwayHint = GetMaelstromGcWalkwayHint(dest, npcName);
+            // The walkway hint matches on NPC name ("Personnel Officer"), so it must be gated to
+            // the Maelstrom HQ — elsewhere it handed Limsa coordinates to Ul'dah/Gridania runs.
+            var walkwayHint = Plugin.Config.GrandCompanyIndex == 0
+                              && Service.ClientState.TerritoryType == MaelstromRepairZone
+                ? GetMaelstromGcWalkwayHint(dest, npcName)
+                : dest;
             var npc = FindMaelstromGcNpc(npcName, dest);
             if (npc != null)
             {
@@ -1848,6 +1889,7 @@ public sealed class FarmController : IDisposable
         if (!IsRunning) return;
 
         const int maxApproachAttempts = 5;
+        var lastApproachDist = float.MaxValue;
         for (var attempt = 1; attempt <= maxApproachAttempts; attempt++)
         {
             if (!IsRunning) return;
@@ -1897,6 +1939,16 @@ public sealed class FarmController : IDisposable
             }
             else
             {
+                // An officer behind a counter is an off-mesh goal: once an attempt gains no
+                // ground, the mover is already as close as its mesh allows and every further
+                // attempt just burns ~5s. Stop approaching and let the interact decide.
+                if (attempt > 1 && npcInfo.Item2 >= lastApproachDist - 0.5f)
+                {
+                    await LogAsync($"Last approach gained no ground ({npcInfo.Item2:F1}y from {npcName}) — interacting from here");
+                    break;
+                }
+
+                lastApproachDist = npcInfo.Item2;
                 await VnavApproachNpcAsync(npcPos, npcName, dest);
             }
             await WaitForMovementStopAsync();
@@ -2051,7 +2103,11 @@ public sealed class FarmController : IDisposable
         var moved = await IpcManager.VnavMoveCloseToAndWaitAsync(
             dest, NpcApproachRange, false, 120_000, GetDistAsync, IsNavCancelledAsync);
         if (!moved && IsRunning)
-            await LogAsync($"WARN: vnavmesh could not approach {npcName}");
+        {
+            var detail = IpcManager.MovementFailureDetail();
+            await LogAsync($"WARN: {IpcManager.MovementProviderName} could not approach {npcName}"
+                + (detail.Length > 0 ? $" — {detail}" : ""));
+        }
     }
 
     private static Vector3 GetMaelstromStagingHub(Vector3 finalDest) =>

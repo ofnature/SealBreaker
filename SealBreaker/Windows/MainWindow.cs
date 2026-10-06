@@ -2,6 +2,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
 using Dalamud.Interface.ManagedFontAtlas;
+using Dalamud.Interface.Utility;
 using SealBreaker.Services;
 using System;
 using System.Collections.Generic;
@@ -18,8 +19,6 @@ public sealed class MainWindow : Window, IDisposable
     private static readonly Vector4 ColRed    = new(0.9f, 0.2f, 0.2f, 1f);
     private static readonly Vector4 ColYellow = new(0.9f, 0.9f, 0.2f, 1f);
     private static readonly Vector4 ColGray   = new(0.6f, 0.6f, 0.6f, 1f);
-    private static readonly Vector4 ColTitle  = new(1.0f, 0.78f, 0.35f, 1f);
-    private static readonly Vector4 ColTitleGlow = new(0.0f, 0.95f, 0.95f, 0.35f);
     private const string BannerTitleFontName = "CinzelDecorative-Bold.ttf";
 
     private static readonly string[] GcTownTabNames = ["Limsa", "Gridania", "Ul'dah"];
@@ -75,9 +74,12 @@ public sealed class MainWindow : Window, IDisposable
     {
         _bannerTitleFont = CreateBannerTitleFont();
 
+        // Banner shell: 160px sidebar + 88px plaque header need more room than the old layout.
+        Size = new Vector2(860, 640);
+        SizeCondition = ImGuiCond.FirstUseEver;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(580, 540),
+            MinimumSize = new Vector2(800, 580),
             MaximumSize = new Vector2(1100, 1200),
         };
 
@@ -102,28 +104,27 @@ public sealed class MainWindow : Window, IDisposable
 
         using var theme = UiTheme.Begin();
 
-        if (cfg.ShowWindowBanner)
-            DrawPluginBanner();
-
-        DrawConfigSearch();
-        DrawStatusHeader(ctrl, cfg);
-
         var availHeight = ImGui.GetContentRegionAvail().Y;
 
         ImGui.PushStyleColor(ImGuiCol.ChildBg, UiTheme.NavBg);
         ImGui.BeginChild("##sbSidebar", new Vector2(SidebarWidth, availHeight), false);
+        DrawSidebarSearch();
         DrawSidebar(cfg, ctrl);
         ImGui.EndChild();
         ImGui.PopStyleColor();
 
         ImGui.SameLine(0, 4);
 
+        ImGui.BeginGroup();
+        DrawPlaqueHeader(ctrl, cfg);
+
         ImGui.PushStyleColor(ImGuiCol.ChildBg, UiTheme.ContentBg);
-        ImGui.BeginChild("##sbContent", new Vector2(0, availHeight), true);
+        ImGui.BeginChild("##sbContent", new Vector2(0, ImGui.GetContentRegionAvail().Y), true);
         DrawSectionHeader(cfg);
         DrawCurrentSection(cfg, ctrl);
         ImGui.EndChild();
         ImGui.PopStyleColor();
+        ImGui.EndGroup();
 
         _transferUi.Draw(cfg);
     }
@@ -138,7 +139,7 @@ public sealed class MainWindow : Window, IDisposable
         Log, General, SetupGuide,
     }
 
-    private const float SidebarWidth = 150f;
+    private const float SidebarWidth = 160f;
     private SbSection _section = SbSection.Dashboard;
     private string _configSearch = string.Empty;
     private HashSet<SbSection>? _searchMatches;
@@ -160,33 +161,32 @@ public sealed class MainWindow : Window, IDisposable
         [SbSection.SetupGuide]   = ("Setup guide", "first-run checklist", "setup guide plugins first run checklist help install"),
     };
 
-    private void DrawConfigSearch()
+    /// <summary>Search box at the top of the sidebar; filters the nav rows below it.</summary>
+    private void DrawSidebarSearch()
     {
-        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - 26);
+        const float margin = 6f;
+        var hasQuery = !string.IsNullOrEmpty(_configSearch);
+
+        ImGui.Dummy(new Vector2(0, 3));
+        ImGui.SetCursorPosX(margin);
+        ImGui.SetNextItemWidth(SidebarWidth - margin * 2 - (hasQuery ? 28f : 0f));
         if (ImGui.InputTextWithHint("##sbSearch", "Search settings...", ref _configSearch, 128))
             UpdateConfigSearch();
 
-        ImGui.SameLine();
-        if (!string.IsNullOrEmpty(_configSearch))
+        if (hasQuery)
         {
+            ImGui.SameLine(0, 4);
             if (ImGuiComponents.IconButton(FontAwesomeIcon.Times))
             {
                 _configSearch = string.Empty;
                 _searchMatches = null;
             }
-        }
-        else
-        {
-            UiTheme.Icon(FontAwesomeIcon.Search, UiTheme.NavHeader);
-        }
 
-        if (!string.IsNullOrEmpty(_configSearch))
-        {
-            var count = _searchMatches?.Count ?? 0;
-            if (count == 0)
+            if ((_searchMatches?.Count ?? 0) == 0 && !string.IsNullOrEmpty(_configSearch))
+            {
+                ImGui.SetCursorPosX(margin + 4f);
                 ImGui.TextColored(UiTheme.Red, "No sections match");
-            else
-                ImGui.TextDisabled($"{count} section(s) match");
+            }
         }
     }
 
@@ -217,85 +217,188 @@ public sealed class MainWindow : Window, IDisposable
         }
     }
 
-    private void DrawStatusHeader(FarmController ctrl, Configuration cfg)
+    private const float HeaderHeight = 88f;
+
+    // The stone face of banner.png as fractions of the image (x, y, width, height). Everything
+    // outside it is frame and black margin, which is why the header crops instead of scaling.
+    private static readonly Vector4 BannerStone = new(0.0698f, 0.3346f, 0.8604f, 0.3075f);
+
+    private static readonly string[] FarmModeTaglines =
+        ["GRAND COMPANY FARM", "TOMESTONE RELIC FARM", "JOB LEVELING", "MOOGLE TOMESTONE FARM"];
+
+    private static (string Duty, string Runner) DutyAndRunner(Configuration cfg, bool longRunner)
     {
-        var (label, col) = ctrl.State switch
-        {
-            FarmController.FarmState.Idle  => ("Idle",    UiTheme.Gray),
-            FarmController.FarmState.Error => ("Error",   UiTheme.Red),
-            _                              => ("Running", UiTheme.Green),
-        };
-
-        UiTheme.StatusDot(col);
-        ImGui.SameLine(0, 5);
-        ImGui.TextColored(col, label);
-
-        ImGui.SameLine(0, 8);
-        var dutyName = cfg.DutyRunner == 1
+        var duty = cfg.DutyRunner == 1
             ? DutySupportCatalog.SelectedOrDefault(cfg).Name
             : AutoDutyCatalog.SelectedOrDefault(cfg).Name;
-        ImGui.TextColored(UiTheme.TextBright, dutyName);
-
-        ImGui.SameLine(0, 8);
-        var runnerLabel = cfg.DutyRunner switch
+        var runner = cfg.DutyRunner switch
         {
-            1 => "ADS",
+            1 => longRunner ? "ADS · Duty Support" : "ADS",
             2 => "Theseus",
             _ => cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty",
         };
-        ImGui.TextColored(UiTheme.Gray, runnerLabel);
+        return (duty, runner);
+    }
 
-        if (ctrl.IsRunning && !ctrl.IsAnyTestMode)
+    private static bool RequiredPluginsReady(Configuration cfg)
+    {
+        var dutyReady = cfg.DutyRunner switch
         {
-            ImGui.SameLine(0, 10);
-            var runText = $"Run {Math.Min(ctrl.RunsThisCycle + 1, cfg.RunsPerCycle)}/{cfg.RunsPerCycle}";
-            if (cfg.TotalRunLimit > 0)
-                runText += $" · {ctrl.TotalRuns}/{cfg.TotalRunLimit} total";
-            ImGui.TextColored(UiTheme.Gray, runText);
+            1 => IpcManager.AdsAvailable,
+            2 => IpcManager.TheseusAvailable,
+            _ => IpcManager.AutoDutyAvailable,
+        };
+        return dutyReady && IpcManager.VnavAvailable && IpcManager.LifestreamAvailable;
+    }
 
-            var elapsed = DateTime.Now - ctrl.StartTime;
-            ImGui.SameLine(0, 10);
-            ImGui.TextColored(UiTheme.NavHeader, $"{elapsed:hh\\:mm\\:ss}");
+    /// <summary>Identity header on every page: the banner's stone as the backdrop, the name set on
+    /// it, and status + Start/Stop on a darkened right side. With "Show window banner" off (or the
+    /// texture missing) the same header is drawn on a plain gradient.</summary>
+    private void DrawPlaqueHeader(FarmController ctrl, Configuration cfg)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var size = new Vector2(ImGui.GetContentRegionAvail().X, HeaderHeight * scale);
+        var min = ImGui.GetCursorScreenPos();
+        var max = min + size;
+        var drawList = ImGui.GetWindowDrawList();
+        static uint U32(Vector4 c) => ImGui.ColorConvertFloat4ToU32(c);
+
+        var hasImage = false;
+        if (cfg.ShowWindowBanner
+            && Plugin.PluginBanner != null
+            && Plugin.PluginBanner.TryGetWrap(out var banner, out _)
+            && banner.Width > 0 && banner.Height > 0)
+        {
+            // Cover-crop the stone to the header's shape, centred.
+            var stoneW = BannerStone.Z * banner.Width;
+            var stoneH = BannerStone.W * banner.Height;
+            var targetAspect = size.X / size.Y;
+            var cropW = stoneW;
+            var cropH = stoneW / targetAspect;
+            if (cropH > stoneH)
+            {
+                cropH = stoneH;
+                cropW = stoneH * targetAspect;
+            }
+
+            var centerX = (BannerStone.X + BannerStone.Z / 2f) * banner.Width;
+            var centerY = (BannerStone.Y + BannerStone.W / 2f) * banner.Height;
+            var uv0 = new Vector2((centerX - cropW / 2f) / banner.Width, (centerY - cropH / 2f) / banner.Height);
+            var uv1 = new Vector2((centerX + cropW / 2f) / banner.Width, (centerY + cropH / 2f) / banner.Height);
+            drawList.AddImage(banner.Handle, min, max, uv0, uv1);
+            hasImage = true;
+
+            // Scrim: light over the name, near-opaque under the status and button.
+            var dark = new Vector4(0.024f, 0.031f, 0.071f, 1f);
+            uint Dark(float alpha) => U32(dark with { W = alpha });
+            var x1 = min.X + size.X * 0.40f;
+            var x2 = min.X + size.X * 0.75f;
+            drawList.AddRectFilled(min, new Vector2(x1, max.Y), Dark(0.30f));
+            drawList.AddRectFilledMultiColor(new Vector2(x1, min.Y), new Vector2(x2, max.Y),
+                Dark(0.30f), Dark(0.88f), Dark(0.88f), Dark(0.30f));
+            drawList.AddRectFilledMultiColor(new Vector2(x2, min.Y), max,
+                Dark(0.88f), Dark(0.94f), Dark(0.94f), Dark(0.88f));
         }
 
-        // Compact Start/Stop pinned to the right edge of the header row.
-        ImGui.SameLine();
-        const float headerButtonWidth = 64f;
-        var avail = ImGui.GetContentRegionAvail().X;
-        if (avail > headerButtonWidth)
-            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + avail - headerButtonWidth);
-
-        if (ctrl.IsRunning)
+        if (!hasImage)
         {
-            if (UiTheme.StopButton("Stop##hdr", new Vector2(headerButtonWidth, 22))) ctrl.Stop();
+            var left = Vector4.Lerp(UiTheme.PanelBg, UiTheme.Accent, 0.16f);
+            drawList.AddRectFilledMultiColor(min, max,
+                U32(left), U32(UiTheme.PanelBg), U32(UiTheme.PanelBg), U32(left));
+        }
+
+        drawList.AddRectFilledMultiColor(new Vector2(min.X, max.Y - 2f * scale), max,
+            U32(UiTheme.Accent), U32(UiTheme.Teal with { W = 0.7f }), U32(UiTheme.Teal with { W = 0.7f }), U32(UiTheme.Accent));
+
+        // ── Name and tagline ──
+        const string word = "Seal Breaker";
+        var baseFontSize = ImGui.GetFontSize();
+        var smallSize = baseFontSize * 0.8f;
+        var tagline = FarmModeTaglines[Math.Clamp(cfg.FarmMode, 0, FarmModeTaglines.Length - 1)];
+        var textX = min.X + 22f * scale;
+
+        var useTitleFont = cfg.ShowWindowBanner && _bannerTitleFont is { Available: true };
+        var shadow = U32(new Vector4(0f, 0f, 0f, 0.85f));
+        float wordSize;
+        Vector2 wordPos;
+
+        // The title font lives in its own atlas, so it has to be pushed to draw with it — and
+        // the tagline is drawn after the pop, back on the default font.
+        using (useTitleFont ? _bannerTitleFont!.Push() : null)
+        {
+            var font = ImGui.GetFont();
+            wordSize = useTitleFont ? ImGui.GetFontSize() : baseFontSize * 1.5f;
+            var blockHeight = wordSize + 5f * scale + smallSize;
+            wordPos = new Vector2(textX, min.Y + (size.Y - blockHeight) / 2f);
+
+            drawList.AddText(font, wordSize, wordPos + new Vector2(0f, 2f * scale), shadow, word);
+            drawList.AddText(font, wordSize, wordPos + new Vector2(1.5f * scale, 1f * scale), shadow, word);
+            drawList.AddText(font, wordSize, wordPos, U32(new Vector4(1f, 0.945f, 0.812f, 1f)), word);
+        }
+
+        var tagPos = new Vector2(textX, wordPos.Y + wordSize + 5f * scale);
+        var tagFont = ImGui.GetFont();
+        drawList.AddText(tagFont, smallSize, tagPos + new Vector2(0f, 1f), shadow, tagline);
+        drawList.AddText(tagFont, smallSize, tagPos, U32(UiTheme.Accent), tagline);
+
+        // ── Status, detail, Start/Stop ──
+        var (pillText, pillColor) = ctrl.State switch
+        {
+            FarmController.FarmState.Idle  => ("Idle", UiTheme.Gray),
+            FarmController.FarmState.Error => ("Error", UiTheme.Red),
+            _ => ctrl.StopAfterRunRequested ? ("Stopping after this run", UiTheme.Yellow) : ("Running", UiTheme.Green),
+        };
+
+        var buttonSize = new Vector2(64f, 26f) * scale;
+        var buttonPos = new Vector2(max.X - 16f * scale - buttonSize.X, min.Y + (size.Y - buttonSize.Y) / 2f);
+        var rightEdge = buttonPos.X - 14f * scale;
+
+        string detail;
+        var detailColor = new Vector4(0.79f, 0.80f, 0.84f, 1f);
+        if (ctrl.State == FarmController.FarmState.Error && ctrl.LastError != null)
+        {
+            detail = ctrl.LastError;
+            detailColor = UiTheme.Red;
         }
         else
         {
-            var dutyReady = cfg.DutyRunner switch
+            var (duty, runner) = DutyAndRunner(cfg, longRunner: false);
+            detail = $"{duty} · {runner}";
+            if (ctrl.IsRunning)
             {
-                1 => IpcManager.AdsAvailable,
-                2 => IpcManager.TheseusAvailable,
-                _ => IpcManager.AutoDutyAvailable,
-            };
-            var allReady = dutyReady && IpcManager.VnavAvailable && IpcManager.LifestreamAvailable;
-            if (!allReady) ImGui.BeginDisabled();
-            if (UiTheme.StartButton("Start##hdr", new Vector2(headerButtonWidth, 22))) ctrl.Start();
-            if (!allReady) ImGui.EndDisabled();
+                if (!ctrl.IsAnyTestMode && cfg.RunsPerCycle > 1)
+                    detail += $" · Run {Math.Min(ctrl.RunsThisCycle + 1, cfg.RunsPerCycle)}/{cfg.RunsPerCycle}";
+                detail += $" · {DateTime.Now - ctrl.StartTime:hh\\:mm\\:ss}";
+            }
         }
 
-        if (ctrl.StopAfterRunRequested)
+        detail = UiTheme.Ellipsize(detail, size.X * 0.48f);
+        var pillSize = UiTheme.PillSize(pillText);
+        var detailSize = ImGui.CalcTextSize(detail);
+        var stackTop = min.Y + (size.Y - (pillSize.Y + 6f * scale + detailSize.Y)) / 2f;
+
+        UiTheme.PillAt(new Vector2(rightEdge - pillSize.X, stackTop), pillText, pillColor);
+        drawList.AddText(new Vector2(rightEdge - detailSize.X, stackTop + pillSize.Y + 6f * scale), U32(detailColor), detail);
+
+        ImGui.SetCursorScreenPos(buttonPos);
+        if (ctrl.IsRunning)
         {
-            UiTheme.Icon(FontAwesomeIcon.FlagCheckered, UiTheme.Yellow);
-            ImGui.SameLine(0, 6);
-            ImGui.TextColored(UiTheme.Yellow, "Stopping after the current run finishes");
+            if (UiTheme.StopButton("Stop##hdr", buttonSize))
+                ctrl.Stop();
+        }
+        else
+        {
+            var ready = RequiredPluginsReady(cfg);
+            if (!ready) ImGui.BeginDisabled();
+            if (UiTheme.StartButton("Start##hdr", buttonSize))
+                ctrl.Start();
+            if (!ready) ImGui.EndDisabled();
+            if (!ready && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip("Install/enable the plugins marked red on the Dashboard.");
         }
 
-        if (ctrl.LastError != null)
-            ImGui.TextColored(UiTheme.Red, ctrl.LastError.Length > 90 ? ctrl.LastError[..90] + "..." : ctrl.LastError);
-
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
+        ImGui.SetCursorScreenPos(min);
+        ImGui.Dummy(size);
     }
 
     private void DrawSidebar(Configuration cfg, FarmController ctrl)
@@ -402,8 +505,13 @@ public sealed class MainWindow : Window, IDisposable
     private void DrawSectionHeader(Configuration cfg)
     {
         var meta = SectionMeta[_section];
+        const float titleScale = 1.2f;
+        ImGui.SetWindowFontScale(titleScale);
         ImGui.TextColored(UiTheme.Accent, meta.Title);
-        ImGui.SameLine(0, 8);
+        ImGui.SetWindowFontScale(1f);
+        ImGui.SameLine(0, 9);
+        // Sit the smaller subtitle on the larger title's baseline.
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + ImGui.GetFontSize() * (titleScale - 1f) * 0.8f);
         ImGui.TextColored(UiTheme.NavHeader, meta.Sub);
 
         var chip = SectionChip(cfg);
@@ -452,9 +560,7 @@ public sealed class MainWindow : Window, IDisposable
         switch (_section)
         {
             case SbSection.Dashboard:
-                DrawStatusPanel(ctrl);
-                DrawStatsPanel(ctrl);
-                DrawControlButtons(ctrl);
+                DrawDashboard(ctrl, cfg);
                 break;
             case SbSection.Duty:
                 DrawDutySection(cfg);
@@ -519,27 +625,6 @@ public sealed class MainWindow : Window, IDisposable
         }
     }
 
-    private void DrawPluginBanner()
-    {
-        if (Plugin.PluginBanner == null || !Plugin.PluginBanner.TryGetWrap(out var banner, out _))
-            return;
-
-        var availWidth = ImGui.GetContentRegionAvail().X;
-        if (availWidth <= 0 || banner.Width <= 0)
-            return;
-
-        var bannerHeight = availWidth * (banner.Height / (float)banner.Width);
-        var bannerSize = new Vector2(availWidth, bannerHeight);
-        var bannerPos = ImGui.GetCursorScreenPos();
-
-        ImGui.Image(banner.Handle, bannerSize);
-
-        using var font = _bannerTitleFont?.Push();
-        DrawBannerTitleText(bannerPos, bannerSize);
-
-        ImGui.Spacing();
-    }
-
     private static IFontHandle? CreateBannerTitleFont()
     {
         var pluginDirectory = Service.PluginInterface.AssemblyLocation.DirectoryName;
@@ -554,47 +639,12 @@ public sealed class MainWindow : Window, IDisposable
         {
             var config = new SafeFontConfig
             {
-                SizePx = UiBuilder.DefaultFontSizePx * 2.15f,
+                // Sized for the 88px plaque header, not the old full-height banner.
+                SizePx = UiBuilder.DefaultFontSizePx * 1.6f,
             };
 
             tk.Font = tk.AddFontFromFile(fontPath, config);
         }));
-    }
-
-    private static void DrawBannerTitleText(Vector2 bannerPos, Vector2 bannerSize)
-    {
-        const string text = "Seal Breaker";
-        var font = ImGui.GetFont();
-        var fontSize = ImGui.GetFontSize();
-        var textSize = ImGui.CalcTextSize(text);
-        var textPos = new Vector2(
-            bannerPos.X + (bannerSize.X - textSize.X) / 2f,
-            bannerPos.Y + (bannerSize.Y - textSize.Y) / 2f);
-
-        var drawList = ImGui.GetWindowDrawList();
-
-        for (var dx = -2; dx <= 2; dx += 2)
-        {
-            for (var dy = -2; dy <= 2; dy += 2)
-            {
-                if (dx == 0 && dy == 0)
-                    continue;
-
-                drawList.AddText(font, fontSize,
-                    new Vector2(textPos.X + dx, textPos.Y + dy),
-                    ImGui.ColorConvertFloat4ToU32(ColTitleGlow),
-                    text);
-            }
-        }
-
-        drawList.AddText(font, fontSize,
-            new Vector2(textPos.X + 3f, textPos.Y + 3f),
-            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.8f)),
-            text);
-        drawList.AddText(font, fontSize,
-            textPos,
-            ImGui.ColorConvertFloat4ToU32(ColTitle),
-            text);
     }
 
     private static readonly string[] FarmModeNames = ["Grand Company seal loop", "Tomestone relic farm (arcanite)", "Job leveling (round-robin)", "Moogle tomestone farm"];
@@ -1729,7 +1779,7 @@ public sealed class MainWindow : Window, IDisposable
             cfg.Save();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Disable this if the banner image or custom title font causes display/rendering issues.");
+            ImGui.SetTooltip("Draws the banner's stone and the title font in the header.\nDisable this if the image or font causes display issues; the header stays, on a plain background.");
 
         var autoDismiss = cfg.AutoDismissGcOfficerMenu;
         if (ImGui.Checkbox("Auto-close GC officer menus", ref autoDismiss))
@@ -2753,63 +2803,12 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.PopStyleColor();
     }
 
-    private static void DrawStatusPanel(FarmController ctrl)
+    // ── Dashboard ─────────────────────────────────────────────
+
+    private const float DashboardGap = 8f;
+
+    private void DrawDashboard(FarmController ctrl, Configuration cfg)
     {
-        var cfg = Plugin.Config;
-
-        using (UiTheme.Card())
-        {
-            var (label, col) = ctrl.State switch
-            {
-                FarmController.FarmState.Idle  => ("Idle",    UiTheme.Gray),
-                FarmController.FarmState.Error => ("Error",   UiTheme.Red),
-                _                              => ("Running", UiTheme.Green),
-            };
-
-            UiTheme.StatusDot(col);
-            ImGui.SameLine(0, 5);
-            ImGui.TextColored(col, label);
-
-            ImGui.SameLine(0, 8);
-            var dutyName = cfg.DutyRunner == 1
-                ? DutySupportCatalog.SelectedOrDefault(cfg).Name
-                : AutoDutyCatalog.SelectedOrDefault(cfg).Name;
-            var runnerLabel = cfg.DutyRunner switch
-            {
-                1 => "ADS · Duty Support",
-                2 => "Theseus",
-                _ => cfg.AutoDutyModeConfigValue() is { } mode ? $"AutoDuty · {mode}" : "AutoDuty",
-            };
-            ImGui.TextColored(UiTheme.TextBright, dutyName);
-            ImGui.SameLine(0, 8);
-            ImGui.TextColored(UiTheme.Gray, runnerLabel);
-
-            if (ctrl.IsRunning)
-            {
-                var elapsed = DateTime.Now - ctrl.StartTime;
-                ImGui.SameLine();
-                UiTheme.RightAlignedText($"{elapsed:hh\\:mm\\:ss}", UiTheme.Gray);
-            }
-
-            if (ctrl.IsRunning && !ctrl.IsAnyTestMode && cfg.RunsPerCycle > 0)
-            {
-                var done = Math.Clamp(ctrl.RunsThisCycle, 0, cfg.RunsPerCycle);
-                var current = Math.Min(done + 1, cfg.RunsPerCycle);
-                ImGui.PushStyleColor(ImGuiCol.PlotHistogram, UiTheme.GreenDark);
-                ImGui.ProgressBar(done / (float)cfg.RunsPerCycle, new Vector2(-1, 16), $"Run {current} / {cfg.RunsPerCycle}");
-                ImGui.PopStyleColor();
-            }
-
-            if (ctrl.StopAfterRunRequested)
-            {
-                UiTheme.Icon(FontAwesomeIcon.FlagCheckered, UiTheme.Yellow);
-                ImGui.SameLine(0, 6);
-                ImGui.TextColored(UiTheme.Yellow, "Stopping after the current run finishes");
-            }
-
-            ImGui.TextColored(UiTheme.Gray, ctrl.StatusMessage);
-        }
-
         if (ctrl.LastError != null)
         {
             using (UiTheme.Card())
@@ -2820,50 +2819,232 @@ public sealed class MainWindow : Window, IDisposable
                 ImGui.TextWrapped(ctrl.LastError);
             }
         }
+
+        DrawStatTiles(ctrl, cfg);
+        DrawNowPanel(ctrl, cfg);
+        DrawSealsAndPluginsRow(cfg);
+        DrawControlButtons(ctrl);
+        DrawRecentLogPanel();
     }
 
-    private static void DrawStatsPanel(FarmController ctrl)
+    private static void DrawStatTiles(FarmController ctrl, Configuration cfg)
     {
-        var elapsed = ctrl.IsRunning
-            ? DateTime.Now - ctrl.StartTime
-            : TimeSpan.Zero;
-        var duckBonesTotal = FarmController.GetDuckBoneInventoryCount();
-        var duckBonesValue = duckBonesTotal * 360;
+        var width = MathF.Floor((ImGui.GetContentRegionAvail().X - DashboardGap * 3) / 4f);
 
-        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(9, 6));
-        if (ImGui.BeginTable("##farmMetrics", 3, ImGuiTableFlags.SizingStretchSame))
+        var runs = cfg.TotalRunLimit > 0 ? $"{ctrl.TotalRuns} / {cfg.TotalRunLimit}" : $"{ctrl.TotalRuns}";
+        if (UiTheme.StatTile("Runs", runs, $"cycle {ctrl.TotalCycles}", width, UiTheme.Accent) && ctrl.IsRunning)
+            ImGui.SetTooltip($"Runtime {DateTime.Now - ctrl.StartTime:hh\\:mm\\:ss}");
+
+        ImGui.SameLine(0, DashboardGap);
+        UiTheme.StatTile("Seals earned", ctrl.TotalSeals > 0 ? $"+{ctrl.TotalSeals:N0}" : "0", null,
+            width, UiTheme.Accent, UiTheme.Accent);
+
+        ImGui.SameLine(0, DashboardGap);
+        var duckBones = FarmController.GetDuckBoneInventoryCount();
+        if (UiTheme.StatTile("Duck Bones", $"{duckBones:N0}", $"≈ {duckBones * 360:N0}g", width, UiTheme.Accent))
+            ImGui.SetTooltip($"{duckBones:N0} in bags, estimated at 360 gil each.\nBought this session: {ctrl.TotalDuckbones:N0}");
+
+        ImGui.SameLine(0, DashboardGap);
+        var tracked = ctrl.TotalRunsTracked > 0;
+        if (UiTheme.StatTile("Avg clear",
+                tracked ? $"{ctrl.AverageClearTime:mm\\:ss}" : "—",
+                tracked ? $"best {ctrl.FastestClearTime:mm\\:ss}" : null,
+                width, UiTheme.Teal) && tracked)
+            ImGui.SetTooltip($"Fastest {ctrl.FastestClearTime:mm\\:ss} · slowest {ctrl.SlowestClearTime:mm\\:ss} over {ctrl.TotalRunsTracked} run(s)");
+    }
+
+    private static readonly (FarmController.LoopStage Stage, string Label)[] LoopSteps =
+    [
+        (FarmController.LoopStage.Duty, "Duty"),
+        (FarmController.LoopStage.Deliver, "Deliver"),
+        (FarmController.LoopStage.Buy, "Buy"),
+        (FarmController.LoopStage.Extract, "Extract"),
+        (FarmController.LoopStage.Repair, "Repair"),
+    ];
+
+    private static void DrawNowPanel(FarmController ctrl, Configuration cfg)
+    {
+        var multiRun = ctrl.IsRunning && !ctrl.IsAnyTestMode && cfg.RunsPerCycle > 1;
+        var fontSize = ImGui.GetFontSize();
+        var height = 18f + (fontSize + 3f) + 6f + (fontSize + 4f) + (multiRun ? 22f : 0f);
+
+        if (UiTheme.BeginPanel("##nowPanel", new Vector2(0, height)))
         {
-            var cellBg = ImGui.ColorConvertFloat4ToU32(UiTheme.CardBg);
-            void Cell(string label, string value, Vector4? color = null)
-            {
-                ImGui.TableNextColumn();
-                ImGui.TableSetBgColor(ImGuiTableBgTarget.CellBg, cellBg);
-                UiTheme.MetricCell(label, value, color);
-            }
+            UiTheme.PanelTitle("Now", ctrl.StatusMessage);
+            DrawLoopSteps(ctrl.CurrentLoopStage);
 
-            Cell("Seals earned", $"{ctrl.TotalSeals:N0}", UiTheme.Accent);
-            var runLimit = Plugin.Config.TotalRunLimit;
-            Cell("Runs", runLimit > 0 ? $"{ctrl.TotalRuns} / {runLimit}" : $"{ctrl.TotalRuns}");
-            Cell("Cycles", $"{ctrl.TotalCycles}");
-            Cell("Duck bones", $"{duckBonesTotal:N0}");
-            Cell("Bought", $"{ctrl.TotalDuckbones:N0}");
-            Cell("Est. value", $"{duckBonesValue:N0}g", UiTheme.Green);
-            Cell("Runtime", $"{elapsed:hh\\:mm\\:ss}");
-            if (ctrl.TotalRunsTracked > 0)
+            if (multiRun)
             {
-                Cell("Avg clear", $"{ctrl.AverageClearTime:mm\\:ss}");
-                Cell("Best / worst", $"{ctrl.FastestClearTime:mm\\:ss} / {ctrl.SlowestClearTime:mm\\:ss}");
+                var done = Math.Clamp(ctrl.RunsThisCycle, 0, cfg.RunsPerCycle);
+                var current = Math.Min(done + 1, cfg.RunsPerCycle);
+                ImGui.PushStyleColor(ImGuiCol.PlotHistogram, UiTheme.GreenDark);
+                ImGui.ProgressBar(done / (float)cfg.RunsPerCycle, new Vector2(-1, 16), $"Run {current} / {cfg.RunsPerCycle}");
+                ImGui.PopStyleColor();
+            }
+        }
+        UiTheme.EndPanel();
+    }
+
+    /// <summary>Duty → Deliver → Buy → Extract → Repair with the current leg ringed in teal and
+    /// the legs already done this cycle filled gold.</summary>
+    private static void DrawLoopSteps(FarmController.LoopStage current)
+    {
+        static uint U32(Vector4 c) => ImGui.ColorConvertFloat4ToU32(c);
+
+        var drawList = ImGui.GetWindowDrawList();
+        var origin = ImGui.GetCursorScreenPos();
+        var avail = ImGui.GetContentRegionAvail().X;
+        var rowHeight = ImGui.GetFontSize() + 4f;
+        var centerY = origin.Y + rowHeight / 2f;
+        const float dot = 7f;
+        const float labelGap = 6f;
+        const float linePad = 8f;
+
+        var currentIndex = Array.FindIndex(LoopSteps, s => s.Stage == current);
+
+        var labelsWidth = 0f;
+        foreach (var (_, label) in LoopSteps)
+            labelsWidth += dot * 2f + labelGap + ImGui.CalcTextSize(label).X;
+        var line = MathF.Max(10f, (avail - labelsWidth) / (LoopSteps.Length - 1) - linePad * 2f);
+
+        var x = origin.X;
+        for (var i = 0; i < LoopSteps.Length; i++)
+        {
+            var isNow = i == currentIndex;
+            var isDone = currentIndex >= 0 && i < currentIndex;
+            var center = new Vector2(x + dot, centerY);
+
+            if (isDone)
+            {
+                drawList.AddCircleFilled(center, dot, U32(UiTheme.Accent));
+            }
+            else if (isNow)
+            {
+                drawList.AddCircleFilled(center, dot + 3f, U32(UiTheme.Teal with { W = 0.16f }));
+                drawList.AddCircleFilled(center, dot, U32(UiTheme.TealWash));
+                drawList.AddCircle(center, dot, U32(UiTheme.Teal), 0, 1.5f);
             }
             else
             {
-                Cell("Avg clear", "—");
-                Cell("Best / worst", "—");
+                drawList.AddCircle(center, dot, U32(UiTheme.NavyBorder), 0, 1.5f);
             }
 
-            ImGui.EndTable();
+            var label = LoopSteps[i].Label;
+            var labelColor = isNow ? UiTheme.TextBright : isDone ? UiTheme.NavText : UiTheme.NavHeader;
+            var labelX = x + dot * 2f + labelGap;
+            drawList.AddText(new Vector2(labelX, origin.Y + 2f), U32(labelColor), label);
+            x = labelX + ImGui.CalcTextSize(label).X;
+
+            if (i < LoopSteps.Length - 1)
+            {
+                drawList.AddLine(new Vector2(x + linePad, centerY), new Vector2(x + linePad + line, centerY),
+                    U32(isDone ? UiTheme.AccentDim : UiTheme.NavyBorder));
+                x += linePad * 2f + line;
+            }
         }
-        ImGui.PopStyleVar();
-        ImGui.Spacing();
+
+        ImGui.Dummy(new Vector2(avail, rowHeight));
+    }
+
+    private static void DrawSealsAndPluginsRow(Configuration cfg)
+    {
+        var fontSize = ImGui.GetFontSize();
+        var height = 18f + (fontSize + 3f) + 3f * (fontSize + 6f);
+        var avail = ImGui.GetContentRegionAvail().X - DashboardGap;
+        var leftWidth = MathF.Floor(avail * 0.555f);
+
+        if (UiTheme.BeginPanel("##sealsPanel", new Vector2(leftWidth, height)))
+        {
+            UiTheme.PanelTitle("Seals");
+
+            var seals = FarmController.GetCurrentSeals();
+            var cap = Math.Max(1, cfg.SealCap);
+            UiTheme.Gauge(seals / (float)cap, new Vector4(0.725f, 0.541f, 0.180f, 1f), UiTheme.Accent);
+
+            ImGui.TextColored(UiTheme.TextBright, $"{seals:N0}");
+            ImGui.SameLine(0, 4);
+            ImGui.TextColored(UiTheme.Gray, $"/ {cap:N0}");
+            ImGui.SameLine();
+            UiTheme.RightAlignedText($"reserve {cfg.SealReserve:N0}", UiTheme.Gray);
+
+            DrawGrandCompanyLine(cfg);
+        }
+        UiTheme.EndPanel();
+
+        ImGui.SameLine(0, DashboardGap);
+
+        if (UiTheme.BeginPanel("##pluginsPanel", new Vector2(0, height)))
+        {
+            UiTheme.PanelTitle("Plugins");
+            DrawPrereqChips(cfg);
+
+            if (cfg.UseGcTeleportTickets)
+            {
+                var tickets = FarmController.GetOwnedItemCount(FarmController.GcTicketItemIdFor(cfg.GrandCompanyIndex));
+                ImGui.TextColored(tickets > 0 ? UiTheme.Gray : UiTheme.Yellow,
+                    tickets > 0 ? $"{tickets} aetheryte ticket(s) in bags" : "No aetheryte tickets, using Lifestream");
+            }
+        }
+        UiTheme.EndPanel();
+    }
+
+    /// <summary>Tail of the session log, filling whatever height is left on the Dashboard.</summary>
+    private void DrawRecentLogPanel()
+    {
+        var fontSize = ImGui.GetFontSize();
+        var lineHeight = fontSize + 3f;
+        var minHeight = 18f + (fontSize + 3f) + 6f + lineHeight * 2f;
+        var height = MathF.Max(minHeight, ImGui.GetContentRegionAvail().Y - 2f);
+
+        if (UiTheme.BeginPanel("##recentPanel", new Vector2(0, height)))
+        {
+            var avail = ImGui.GetContentRegionAvail().X;
+            UiTheme.PanelTitle("Recent");
+
+            const string link = "Open log";
+            var linkWidth = ImGui.CalcTextSize(link).X + 8f;
+            ImGui.SameLine(avail - linkWidth + ImGui.GetStyle().WindowPadding.X);
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() - 2f);
+            ImGui.PushStyleColor(ImGuiCol.Button, Vector4.Zero);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, UiTheme.TealWash);
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, UiTheme.TealWash);
+            ImGui.PushStyleColor(ImGuiCol.Text, UiTheme.Teal);
+            if (ImGui.SmallButton($"{link}##recentOpenLog"))
+                _section = SbSection.Log;
+            ImGui.PopStyleColor(4);
+
+            var entries = FarmController.GetLogSnapshot();
+            if (entries.Length == 0)
+            {
+                ImGui.TextColored(UiTheme.Gray, "Nothing logged this session yet.");
+            }
+            else
+            {
+                var room = Math.Max(1, (int)((ImGui.GetContentRegionAvail().Y + 2f) / lineHeight));
+                var drawList = ImGui.GetWindowDrawList();
+                for (var i = Math.Max(0, entries.Length - room); i < entries.Length; i++)
+                {
+                    var entry = entries[i];
+                    var color = entry.Severity switch
+                    {
+                        FarmController.LogSeverity.Error => UiTheme.Red,
+                        FarmController.LogSeverity.Warning => UiTheme.Yellow,
+                        _ => UiTheme.NavText,
+                    };
+
+                    var pos = ImGui.GetCursorScreenPos();
+                    var time = $"{entry.Time:HH:mm:ss}";
+                    var timeWidth = ImGui.CalcTextSize(time).X + 8f;
+                    drawList.AddText(pos, ImGui.ColorConvertFloat4ToU32(UiTheme.NavHeader), time);
+                    drawList.AddText(new Vector2(pos.X + timeWidth, pos.Y), ImGui.ColorConvertFloat4ToU32(color),
+                        UiTheme.Ellipsize(entry.Message, avail - timeWidth));
+                    ImGui.Dummy(new Vector2(avail, lineHeight - ImGui.GetStyle().ItemSpacing.Y));
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip(entry.Message);
+                }
+            }
+        }
+        UiTheme.EndPanel();
     }
 
     private static void DrawGcShopBuyList(Configuration cfg, int gcIdx, List<GcShopBuyEntry> buyList)
@@ -3255,22 +3436,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawControlButtons(FarmController ctrl)
     {
-        var cfg = Plugin.Config;
-
-        DrawPrereqChips(cfg);
-        DrawGrandCompanyLine(cfg);
-        ImGui.Spacing();
-
-        var dutyReady = cfg.DutyRunner switch
-        {
-            1 => IpcManager.AdsAvailable,
-            2 => IpcManager.TheseusAvailable,
-            _ => IpcManager.AutoDutyAvailable,
-        };
-
-        var allReady = dutyReady
-                    && IpcManager.VnavAvailable
-                    && IpcManager.LifestreamAvailable;
+        var allReady = RequiredPluginsReady(Plugin.Config);
 
         var buttonSize = new Vector2(ImGui.GetContentRegionAvail().X, 34);
         if (ctrl.IsRunning)
@@ -3328,7 +3494,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private static void DrawGrandCompanyLine(Configuration cfg)
     {
-        var detected = GrandCompanyState.TryGetDetected(out var gcIdx, out var rank, out var sealCap);
+        var detected = GrandCompanyState.TryGetDetected(out var gcIdx, out var rank, out _);
         if (!detected)
             gcIdx = cfg.GrandCompanyIndex;
 
@@ -3336,17 +3502,14 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.SameLine(0, 6);
         ImGui.TextColored(UiTheme.TextBright, GrandCompanyState.GrandCompanyName(gcIdx));
         ImGui.SameLine(0, 8);
-        ImGui.TextColored(
-            UiTheme.Gray,
-            detected
-                ? $"{GrandCompanyState.RankName(rank)} · {GcTownTabNames[gcIdx]}"
-                : $"{GcTownTabNames[gcIdx]} (rank not detected — using saved GC)");
 
-        if (detected)
-        {
-            ImGui.SameLine();
-            UiTheme.RightAlignedText($"{FarmController.GetCurrentSeals():N0} / {sealCap:N0} seals", UiTheme.Gray);
-        }
+        var detail = detected
+            ? $"{GrandCompanyState.RankName(rank)} · {GcTownTabNames[gcIdx]}"
+            : $"{GcTownTabNames[gcIdx]} (rank not detected, using saved GC)";
+        var shown = UiTheme.Ellipsize(detail, ImGui.GetContentRegionAvail().X);
+        ImGui.TextColored(UiTheme.Gray, shown);
+        if (shown != detail && ImGui.IsItemHovered())
+            ImGui.SetTooltip(detail);
     }
 
     private static bool? _adAutoRepairEnabled;
@@ -3368,54 +3531,68 @@ public sealed class MainWindow : Window, IDisposable
         return _adAutoRepairEnabled == true;
     }
 
+    /// <summary>Plugin status chips, wrapping to the next line when the panel is too narrow.</summary>
     private static void DrawPrereqChips(Configuration cfg)
     {
-        if (cfg.DutyRunner == 0)
+        var first = true;
+        void Chip(FontAwesomeIcon icon, string text, Vector4 color, string? tooltip = null)
         {
-            if (IpcManager.AutoDutyAvailable)
-                UiTheme.Chip(FontAwesomeIcon.Check, "AutoDuty", UiTheme.Green);
-            else if (IpcManager.AutoDutyPluginLoaded)
-                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "AutoDuty IPC not ready", UiTheme.Yellow);
-            else
-                UiTheme.Chip(FontAwesomeIcon.Times, "AutoDuty", UiTheme.Red);
+            if (!first)
+            {
+                ImGui.SameLine(0, 14);
+                if (ImGui.GetContentRegionAvail().X < ImGui.CalcTextSize(text).X + 22f)
+                    ImGui.NewLine();
+            }
 
-            if (IpcManager.AutoDutyPluginLoaded && !IpcManager.AutoDutyAvailable
-                && ImGui.IsItemHovered())
-                ImGui.SetTooltip("AutoDuty is loaded but the Run IPC is not ready — restart AutoDuty if this persists.");
-        }
-        else
-        {
-            if (IpcManager.AdsAvailable)
-                UiTheme.Chip(FontAwesomeIcon.Check, "ADS", UiTheme.Green);
-            else if (IpcManager.AdsPluginLoaded)
-                UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "ADS IPC not ready", UiTheme.Yellow);
-            else
-                UiTheme.Chip(FontAwesomeIcon.Times, "ADS", UiTheme.Red);
+            first = false;
+            UiTheme.Chip(icon, text, color);
+            if (tooltip != null && ImGui.IsItemHovered())
+                ImGui.SetTooltip(tooltip);
         }
 
-        ImGui.SameLine(0, 14);
-        UiTheme.Chip(
+        switch (cfg.DutyRunner)
+        {
+            case 1:
+                if (IpcManager.AdsAvailable)
+                    Chip(FontAwesomeIcon.Check, "ADS", UiTheme.Green);
+                else if (IpcManager.AdsPluginLoaded)
+                    Chip(FontAwesomeIcon.ExclamationTriangle, "ADS IPC not ready", UiTheme.Yellow);
+                else
+                    Chip(FontAwesomeIcon.Times, "ADS", UiTheme.Red);
+                break;
+            case 2:
+                Chip(IpcManager.TheseusAvailable ? FontAwesomeIcon.Check : FontAwesomeIcon.Times, "Theseus",
+                    IpcManager.TheseusAvailable ? UiTheme.Green : UiTheme.Red);
+                break;
+            default:
+                if (IpcManager.AutoDutyAvailable)
+                    Chip(FontAwesomeIcon.Check, "AutoDuty", UiTheme.Green);
+                else if (IpcManager.AutoDutyPluginLoaded)
+                    Chip(FontAwesomeIcon.ExclamationTriangle, "AutoDuty IPC not ready", UiTheme.Yellow,
+                        "AutoDuty is loaded but the Run IPC is not ready. Restart AutoDuty if this persists.");
+                else
+                    Chip(FontAwesomeIcon.Times, "AutoDuty", UiTheme.Red);
+                break;
+        }
+
+        Chip(
             IpcManager.VnavAvailable ? FontAwesomeIcon.Check : FontAwesomeIcon.Times,
             cfg.MovementProvider == Configuration.MovementProviderAriadne ? "Ariadne" : "vnavmesh",
             IpcManager.VnavAvailable ? UiTheme.Green : UiTheme.Red);
 
-        ImGui.SameLine(0, 14);
         if (!IpcManager.LifestreamAvailable)
-            UiTheme.Chip(FontAwesomeIcon.Times, "Lifestream", UiTheme.Red);
+            Chip(FontAwesomeIcon.Times, "Lifestream", UiTheme.Red);
         else if (!IpcManager.LifestreamMoveAvailable)
-        {
-            UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "Lifestream (vnav fallback)", UiTheme.Yellow);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Lifestream.Move IPC unavailable — walking routes fall back to vnavmesh.");
-        }
+            Chip(FontAwesomeIcon.ExclamationTriangle, "Lifestream (vnav fallback)", UiTheme.Yellow,
+                "Lifestream.Move IPC unavailable. Walking routes fall back to the movement plugin.");
         else
-            UiTheme.Chip(FontAwesomeIcon.Check, "Lifestream", UiTheme.Green);
+            Chip(FontAwesomeIcon.Check, "Lifestream", UiTheme.Green);
+
+        if (IpcManager.CharonPluginLoaded)
+            Chip(FontAwesomeIcon.Check, "Charon", UiTheme.Teal);
 
         if (AutoDutyRepairConflict(cfg))
-        {
-            UiTheme.Chip(FontAwesomeIcon.ExclamationTriangle, "AutoDuty Auto Repair is ON — conflicts with SealBreaker repair", UiTheme.Yellow);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Both plugins will try to repair, which interferes with SealBreaker's mender route.\nDisable it on the Config tab (Repair section) or in AutoDuty itself.");
-        }
+            Chip(FontAwesomeIcon.ExclamationTriangle, "AutoDuty Auto Repair is ON", UiTheme.Yellow,
+                "Both plugins will try to repair, which interferes with SealBreaker's mender route.\nDisable it on the Repair page or in AutoDuty itself.");
     }
 }

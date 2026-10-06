@@ -827,6 +827,10 @@ internal static class IpcManager
     private static int _movementBoundProvider = -1;
     private static ICallGateSubscriber<int>? _ariadneZoneStatus;
 
+    // Bound whichever provider is selected: Ariadne can also answer the vnavmesh.* names
+    // (its takeover mode), so its last result is worth reading on either setting.
+    private static ICallGateSubscriber<string>? _ariadneLastResult;
+
     private static ICallGateSubscriber<Vector3, bool, bool>? _vnavPathfind;
     private static ICallGateSubscriber<Vector3, bool, float, bool>? _vnavPathfindClose;
     private static ICallGateSubscriber<bool>?                _vnavIsReady;
@@ -902,6 +906,7 @@ internal static class IpcManager
             _vnavNumWaypoints ??= Service.PluginInterface.GetIpcSubscriber<int>(path + "NumWaypoints");
             if (ariadne)
                 _ariadneZoneStatus ??= Service.PluginInterface.GetIpcSubscriber<int>("Ariadne.ZoneStatus");
+            _ariadneLastResult ??= Service.PluginInterface.GetIpcSubscriber<string>("Ariadne.SimpleMove.LastResult");
         }
         catch
         {
@@ -936,6 +941,13 @@ internal static class IpcManager
     {
         if (_vnavSetTolerance is not { HasAction: true })
             return;
+
+        // Ariadne's SetTolerance is its WAYPOINT-pass tolerance (default 0.25) — feeding it the
+        // vnav-tuned approach range (3y) makes every waypoint sloppy and stacks with the
+        // stop-short goal, parking the toon well outside NPC interact range. Keep it tight;
+        // stopping `range` short of the target is the close-to goal's job, not the tolerance's.
+        if (_movementBoundProvider == Configuration.MovementProviderAriadne)
+            tolerance = Math.Min(tolerance, 0.5f);
 
         try { _vnavSetTolerance.InvokeAction(tolerance); }
         catch (Exception ex) { Service.PluginLog.Error(ex, "vnavmesh set tolerance IPC failed"); }
@@ -1103,6 +1115,53 @@ internal static class IpcManager
                 return await VnavMoveToAsync(dest, fly);
             });
     }
+
+    public static string MovementProviderName =>
+        Plugin.Config.MovementProvider == Configuration.MovementProviderAriadne ? "Ariadne" : "vnavmesh";
+
+    /// <summary>Why a move failed, as far as the movement plugin will say: a readiness problem,
+    /// else Ariadne's own last result ("2 waypoints", "stuck (3y short)", "no path (...)") when
+    /// Ariadne is loaded. "" when there is nothing to add.</summary>
+    public static string MovementFailureDetail() => RunVnav(() =>
+    {
+        RefreshVnavSubscribers();
+        try
+        {
+            if (_movementBoundProvider != Configuration.MovementProviderAriadne)
+            {
+                if (!(_vnavIsReady?.InvokeFunc() ?? false))
+                    return "vnavmesh reports its navmesh is not ready";
+            }
+            else
+            {
+                if (!(_vnavIsReady?.InvokeFunc() ?? false))
+                    return "Ariadne is not connected to Mnemosyne";
+
+                var status = _ariadneZoneStatus?.InvokeFunc() ?? 0;
+                if (status is not (2 or 3))
+                {
+                    var statusName = status switch
+                    {
+                        0 => "not ready",
+                        1 => "Mnemosyne unavailable",
+                        4 => "mesh missing",
+                        _ => "unknown",
+                    };
+                    return $"Ariadne has no usable mesh for this zone (status {status}: {statusName})";
+                }
+            }
+
+            if (_ariadneLastResult is { HasFunction: true }
+                && _ariadneLastResult.InvokeFunc() is { Length: > 0 } last)
+                return $"Ariadne's last result: \"{last}\"";
+
+            return "";
+        }
+        catch (Exception ex)
+        {
+            return $"{MovementProviderName} IPC threw: {ex.Message}";
+        }
+    });
 
     public static bool VnavIsReady() => RunVnav(VnavIsReadyCore);
 
@@ -1430,6 +1489,7 @@ internal static class IpcManager
         _daedalusTrustList = null;
         _movementBoundProvider = -1;
         _ariadneZoneStatus = null;
+        _ariadneLastResult = null;
         _vnavPathfind      = null;
         _vnavPathfindClose = null;
         _vnavIsReady       = null;
