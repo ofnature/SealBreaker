@@ -2949,7 +2949,7 @@ public sealed class MainWindow : Window, IDisposable
     private static void DrawSealsAndPluginsRow(Configuration cfg)
     {
         var fontSize = ImGui.GetFontSize();
-        var height = 18f + (fontSize + 3f) + 3f * (fontSize + 6f);
+        var height = 18f + (fontSize + 3f) + 4f * (fontSize + 6f);
         var avail = ImGui.GetContentRegionAvail().X - DashboardGap;
         var leftWidth = MathF.Floor(avail * 0.555f);
 
@@ -2968,6 +2968,7 @@ public sealed class MainWindow : Window, IDisposable
             UiTheme.RightAlignedText($"reserve {cfg.SealReserve:N0}", UiTheme.Gray);
 
             DrawGrandCompanyLine(cfg);
+            DrawWeeklyTomestoneLine();
         }
         UiTheme.EndPanel();
 
@@ -3510,6 +3511,32 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TextColored(UiTheme.Gray, shown);
         if (shown != detail && ImGui.IsItemHovered())
             ImGui.SetTooltip(detail);
+    }
+
+    /// <summary>The currency window's "This Week" row: weekly-capped tomestones earned against the
+    /// allowance, with the countdown to the Tuesday reset.</summary>
+    private static void DrawWeeklyTomestoneLine()
+    {
+        if (FarmController.WeeklyCappedTomestone() is not { } info)
+            return;
+
+        var (_, _, weekly, limit) = FarmController.GetTomestoneStatus(info);
+        var capped = limit > 0 && weekly >= limit;
+
+        UiTheme.Icon(FontAwesomeIcon.Coins, capped ? UiTheme.Yellow : UiTheme.Gray);
+        ImGui.SameLine(0, 6);
+        ImGui.TextColored(UiTheme.TextBright, "This week");
+        ImGui.SameLine(0, 8);
+        ImGui.TextColored(capped ? UiTheme.Yellow : UiTheme.Gray, $"{weekly:N0} / {limit:N0}");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(info.Name);
+
+        var left = FarmController.UntilWeeklyTomestoneReset();
+        var countdown = left.TotalHours >= 1
+            ? $"resets in {(int)left.TotalHours}h {left.Minutes}m"
+            : $"resets in {Math.Max(1, left.Minutes)}m";
+        ImGui.SameLine();
+        UiTheme.RightAlignedText(countdown, UiTheme.Gray);
     }
 
     private static bool? _adAutoRepairEnabled;

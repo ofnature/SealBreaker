@@ -6567,6 +6567,30 @@ public sealed class FarmController : IDisposable
     public static unsafe int GetWeeklyAcquiredTomestones() =>
         InventoryManager.Instance()->GetWeeklyAcquiredTomestoneCount();
 
+    /// <summary>The tomestone with a weekly allowance — the one the currency window shows a
+    /// "This Week" tally for.</summary>
+    public static TomestoneInfo? WeeklyCappedTomestone()
+    {
+        foreach (var t in CurrentTomestones())
+        {
+            if (t.WeeklyLimit > 0)
+                return t;
+        }
+
+        return null;
+    }
+
+    /// <summary>Time until the weekly tomestone allowance resets (Tuesday 08:00 UTC).</summary>
+    public static TimeSpan UntilWeeklyTomestoneReset()
+    {
+        var now = DateTime.UtcNow;
+        var days = ((int)DayOfWeek.Tuesday - (int)now.DayOfWeek + 7) % 7;
+        var reset = now.Date.AddDays(days).AddHours(8);
+        if (reset <= now)
+            reset = reset.AddDays(7);
+        return reset - now;
+    }
+
     /// <summary>Held count and — when the tracked tomestone is the weekly-capped one — this week's
     /// tally, against their caps.</summary>
     public static (int Held, int HeldCap, int Weekly, int WeeklyLimit) GetTomestoneStatus(TomestoneInfo info)
