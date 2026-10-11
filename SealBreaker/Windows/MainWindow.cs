@@ -1171,13 +1171,20 @@ public sealed class MainWindow : Window, IDisposable
 
         var info = tomestones[selected];
         var (held, heldCap, weekly, weeklyLimit) = FarmController.GetTomestoneStatus(info);
-        var capped = (heldCap > 0 && held >= heldCap) || (weeklyLimit > 0 && weekly >= weeklyLimit);
+        var weeklyCapped = weeklyLimit > 0 && weekly >= weeklyLimit;
+        var heldCapped = heldCap > 0 && held >= heldCap;
 
         var text = $"Held {held:N0}/{heldCap:N0}";
         if (weeklyLimit > 0)
             text += $"  ·  This week {weekly:N0}/{weeklyLimit:N0}";
+        if (weeklyCapped)
+            text += "  —  weekly cap reached, farm will stop";
+        else if (heldCapped)
+            text += "  —  held cap reached, farm will stop";
 
-        ImGui.TextColored(capped ? UiTheme.Yellow : UiTheme.Gray, capped ? text + "  —  capped" : text);
+        ImGui.TextColored(weeklyCapped || heldCapped ? UiTheme.Yellow : UiTheme.Gray, text);
+        if (heldCapped && !weeklyCapped && weeklyLimit > 0 && ImGui.IsItemHovered())
+            ImGui.SetTooltip("The game credits no new tomestones (and this week's tally won't move) while you hold the cap.\nSpend some first to keep farming toward the weekly limit.");
     }
 
     private static int _buyListSyncedGc = -1;
