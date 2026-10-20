@@ -272,6 +272,18 @@ public class Configuration : IPluginConfiguration
     /// <summary>Last-used window mode — /seal reopens the mini widget when true.</summary>
     public bool MiniModeActive { get; set; }
 
+    // ── Edge dock ─────────────────────────────────────────────
+
+    /// <summary>Minimizing pins a "Seal Breaker" tab to the screen edge (the compact widget pops out
+    /// beside it) instead of opening the floating mini widget.</summary>
+    public bool EdgeDockEnabled { get; set; }
+
+    /// <summary>Which screen edge the tab is pinned to. Dragging the tab changes it.</summary>
+    public Windows.Dock.DockEdge EdgeDockEdge { get; set; } = Windows.Dock.DockEdge.Left;
+
+    /// <summary>Where along its edge the tab sits: its centre as a fraction of the edge (0.5 = the middle).</summary>
+    public float EdgeDockAlong { get; set; } = 0.5f;
+
     // ── Materia extraction ────────────────────────────────────
     public bool AutoExtractMateriaEnabled { get; set; } = false;
     public bool AutoExtractMateriaBetweenRuns { get; set; } = true;

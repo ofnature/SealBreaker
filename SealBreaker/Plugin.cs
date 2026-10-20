@@ -5,6 +5,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Windowing;
 using SealBreaker.Windows;
+using SealBreaker.Windows.Dock;
 using SealBreaker.Services;
 using System;
 using System.IO;
@@ -24,6 +25,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem _windowSystem = new("SealBreaker");
     private readonly MainWindow   _mainWindow;
     private readonly MiniWindow   _miniWindow;
+    private readonly EdgeDockWindow _edgeDock;
+    private readonly DockLayoutShare _dockLayout;
     private readonly IDalamudPluginInterface _pi;
     private static Plugin _instance = null!;
 
@@ -50,6 +53,22 @@ public sealed class Plugin : IDalamudPlugin
         _windowSystem.AddWindow(_mainWindow);
         _windowSystem.AddWindow(_miniWindow);
 
+        // The edge dock: the minimized form when Config.EdgeDockEnabled — a tab on the screen edge whose
+        // pop-out is the mini widget's own body. The layout is shared with Daedalus's and Charon's tabs so
+        // none cover each other (order 10 and 20; ours sorts after them on a shared spot).
+        _dockLayout = new DockLayoutShare(_pi, "SealBreaker", order: 30);
+        _edgeDock = new EdgeDockWindow(
+            [new EdgeDockWindow.Tab("main", "Seal Breaker", () => true, () => _miniWindow.Draw())],
+            _ => (Config.EdgeDockEdge, Config.EdgeDockAlong),
+            (_, edge, along) =>
+            {
+                Config.EdgeDockEdge = edge;
+                Config.EdgeDockAlong = along;
+                Config.Save();
+            },
+            _dockLayout);
+        _windowSystem.AddWindow(_edgeDock);
+
         Service.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage = "Open Seal Breaker window — add 'mini' for the compact widget"
@@ -70,6 +89,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         Controller.Dispose();
         _windowSystem.RemoveAllWindows();
+        _dockLayout.Dispose();
         _mainWindow.Dispose();
         Service.CommandManager.RemoveHandler(CommandName);
         Service.CommandManager.RemoveHandler(CommandAlias);
@@ -87,6 +107,14 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (args.Trim().Equals("mini", StringComparison.OrdinalIgnoreCase))
         {
+            if (Config.EdgeDockEnabled)
+            {
+                // The edge tab is the minimized form: /seal mini goes to it, or back if already there.
+                if (DockedAway) SwitchToFullWindow();
+                else SwitchToMiniWindow();
+                return;
+            }
+
             _miniWindow.Toggle();
             if (_miniWindow.IsOpen)
                 _mainWindow.IsOpen = false;
@@ -94,18 +122,23 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (Config.MiniModeActive)
+        if (DockedAway)
+            SwitchToFullWindow();
+        else if (Config.MiniModeActive && !Config.EdgeDockEnabled)
             _miniWindow.Toggle();
         else
             _mainWindow.Toggle();
     }
 
-    /// <summary>Swap to the compact widget (main window title-bar minimize button).</summary>
+    /// <summary>Minimized to the edge tab: the dock is on and neither window is open.</summary>
+    private bool DockedAway => Config.EdgeDockEnabled && Config.MiniModeActive && !_mainWindow.IsOpen;
+
+    /// <summary>Minimize (main window title-bar button): to the edge tab, or the floating compact widget.</summary>
     public static void SwitchToMiniWindow()
     {
         _instance._mainWindow.IsOpen = false;
-        _instance._miniWindow.IsOpen = true;
-        _instance.RememberWindowMode();
+        _instance._miniWindow.IsOpen = !Config.EdgeDockEnabled;
+        _instance.SetWindowMode(mini: true);
     }
 
     /// <summary>Swap back to the full window (mini widget expand button).</summary>
@@ -113,7 +146,16 @@ public sealed class Plugin : IDalamudPlugin
     {
         _instance._miniWindow.IsOpen = false;
         _instance._mainWindow.IsOpen = true;
-        _instance.RememberWindowMode();
+        _instance.SetWindowMode(mini: false);
+    }
+
+    private void SetWindowMode(bool mini)
+    {
+        if (Config.MiniModeActive == mini)
+            return;
+
+        Config.MiniModeActive = mini;
+        Config.Save();
     }
 
     private void RememberWindowMode()
@@ -126,7 +168,12 @@ public sealed class Plugin : IDalamudPlugin
         Config.Save();
     }
 
-    private void DrawUI()       => _windowSystem.Draw();
+    private void DrawUI()
+    {
+        _edgeDock.IsOpen = DockedAway && Service.ClientState.IsLoggedIn && _edgeDock.AnyTab();
+        _windowSystem.Draw();
+    }
+
     private void DrawConfigUI() { _miniWindow.IsOpen = false; _mainWindow.Toggle(); }
     private void DrawMainUI()   => OnCommand(CommandName, string.Empty);
 }

@@ -88,7 +88,7 @@ public sealed class MainWindow : Window, IDisposable
             Icon = FontAwesomeIcon.WindowMinimize,
             IconOffset = new Vector2(2, 1),
             Click = _ => Plugin.SwitchToMiniWindow(),
-            ShowTooltip = () => ImGui.SetTooltip("Minimize to the mini widget"),
+            ShowTooltip = () => ImGui.SetTooltip(Plugin.Config.EdgeDockEnabled ? "Minimize to the edge tab" : "Minimize to the mini widget"),
         });
     }
 
@@ -1787,6 +1787,8 @@ public sealed class MainWindow : Window, IDisposable
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Draws the banner's stone and the title font in the header.\nDisable this if the image or font causes display issues; the header stays, on a plain background.");
+
+        DrawEdgeDockSettings(cfg);
 
         var autoDismiss = cfg.AutoDismissGcOfficerMenu;
         if (ImGui.Checkbox("Auto-close GC officer menus", ref autoDismiss))
@@ -3498,6 +3500,43 @@ public sealed class MainWindow : Window, IDisposable
             ImGui.Spacing();
             if (UiTheme.SolidButton("Clear error", UiTheme.RedDark, new Vector2(120, 26))) ctrl.Stop();
         }
+    }
+
+    private static readonly string[] DockEdgeNames = ["Left", "Right", "Top", "Bottom"];
+
+    /// <summary>General section: minimize to an edge tab instead of the floating mini widget.</summary>
+    private static void DrawEdgeDockSettings(Configuration cfg)
+    {
+        var edgeDock = cfg.EdgeDockEnabled;
+        if (ImGui.Checkbox("Minimize to an edge tab", ref edgeDock))
+        {
+            cfg.EdgeDockEnabled = edgeDock;
+            cfg.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("The title-bar minimize button (and /seal mini) pins a \"Seal Breaker\" tab to the screen edge instead of opening the floating widget.\nPoint at the tab and the compact controls pop out beside it; click it to keep them out, click again to let them go.\nDrag the tab to any edge, anywhere along it. Expand on the pop-out, or /seal, brings the full window back.");
+
+        if (!edgeDock)
+            return;
+
+        ImGui.Indent();
+        var edge = (int)cfg.EdgeDockEdge;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.Combo("Tab edge", ref edge, DockEdgeNames, DockEdgeNames.Length))
+        {
+            cfg.EdgeDockEdge = (Dock.DockEdge)edge;
+            cfg.Save();
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Reset position"))
+        {
+            cfg.EdgeDockEdge = Dock.DockEdge.Left;
+            cfg.EdgeDockAlong = 0.5f;
+            cfg.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Put the tab back in the middle of the left edge.");
+        ImGui.Unindent();
     }
 
     private static void DrawGrandCompanyLine(Configuration cfg)
