@@ -133,7 +133,8 @@ public sealed class MainWindow : Window, IDisposable
 
     private enum SbSection
     {
-        Dashboard, Duty, FarmSettings, ItemFilter,
+        // Dashboard, Duty, FarmSettings, ItemFilter, // [STOP-ALERT] [FC-RANK-STOP] StopAlerts added
+        Dashboard, Duty, FarmSettings, StopAlerts, ItemFilter,
         BuyList, Repair, Towns, Materia,
         DesynthEv, DesynthStats,
         Log, General, SetupGuide,
@@ -149,6 +150,7 @@ public sealed class MainWindow : Window, IDisposable
         [SbSection.Dashboard]    = ("Dashboard", "status, metrics, start and tests", "dashboard status metrics seals runs cycles start stop tests delivery shop repair extract kingcake"),
         [SbSection.Duty]         = ("Duty", "which dungeon the farm runs", "duty runner autoduty ads dungeon mistwake mode support trust squadron regular free trial path expansion dawntrail endwalker shadowbringers stormblood heavensward realm reborn ilvl item level auto pick best"),
         [SbSection.FarmSettings] = ("Farm settings", "cycle and session limits", "runs per cycle multi run unlock risk total run limit stop after echo chat leveling mode auto pick equip gear upgrades charon"),
+        [SbSection.StopAlerts]   = ("Stop & alerts", "FC rank stop and the stop sound", "stop alert sound chime se beep wav audio muted free company fc rank milestone rank up farm stopped ipc"), // [STOP-ALERT] [FC-RANK-STOP]
         [SbSection.ItemFilter]   = ("Item filter", "what gets turned in", "item filter blacklist whitelist protected ids list mode deliver turn in"),
         [SbSection.BuyList]      = ("Buy list", "what seals are spent on", "buy list duck bones kingcake aetheryte ticket catalog keep quantity seal cost rank shop"),
         [SbSection.Repair]       = ("Repair", "gear repair between cycles", "repair mender threshold condition ads self npc autoduty auto repair durability"),
@@ -405,7 +407,9 @@ public sealed class MainWindow : Window, IDisposable
     {
         ImGui.Dummy(new Vector2(0, 4));
 
-        DrawNavCategory("FARM", [SbSection.Dashboard, SbSection.Duty, SbSection.FarmSettings, SbSection.ItemFilter], cfg, ctrl);
+        // [STOP-ALERT] [FC-RANK-STOP]
+        // DrawNavCategory("FARM", [SbSection.Dashboard, SbSection.Duty, SbSection.FarmSettings, SbSection.ItemFilter], cfg, ctrl);
+        DrawNavCategory("FARM", [SbSection.Dashboard, SbSection.Duty, SbSection.FarmSettings, SbSection.StopAlerts, SbSection.ItemFilter], cfg, ctrl);
         DrawNavCategory("GRAND COMPANY", [SbSection.BuyList, SbSection.Repair, SbSection.Towns, SbSection.Materia], cfg, ctrl);
         DrawNavCategory("DESYNTH", [SbSection.DesynthEv, SbSection.DesynthStats], cfg, ctrl);
         DrawNavCategory("SYSTEM", [SbSection.Log, SbSection.General, SbSection.SetupGuide], cfg, ctrl);
@@ -567,6 +571,9 @@ public sealed class MainWindow : Window, IDisposable
                 break;
             case SbSection.FarmSettings:
                 DrawFarmSettingsSection(cfg);
+                break;
+            case SbSection.StopAlerts: // [STOP-ALERT] [FC-RANK-STOP]
+                DrawStopAlertsSection(cfg);
                 break;
             case SbSection.ItemFilter:
                 DrawFilterPanel(cfg);
@@ -2958,7 +2965,10 @@ public sealed class MainWindow : Window, IDisposable
     private static void DrawSealsAndPluginsRow(Configuration cfg)
     {
         var fontSize = ImGui.GetFontSize();
-        var height = 18f + (fontSize + 3f) + 4f * (fontSize + 6f);
+        // [FC-RANK-STOP] one more row while the FC milestone stop is on for this character
+        // var height = 18f + (fontSize + 3f) + 4f * (fontSize + 6f);
+        var showFcLine = cfg.FcMilestonesFor(FcRankMonitor.CurrentContentId()).Enabled;
+        var height = 18f + (fontSize + 3f) + (showFcLine ? 5f : 4f) * (fontSize + 6f);
         var avail = ImGui.GetContentRegionAvail().X - DashboardGap;
         var leftWidth = MathF.Floor(avail * 0.555f);
 
@@ -2978,6 +2988,8 @@ public sealed class MainWindow : Window, IDisposable
 
             DrawGrandCompanyLine(cfg);
             DrawWeeklyTomestoneLine();
+            if (showFcLine)
+                DrawFcRankLine(cfg); // [FC-RANK-STOP]
         }
         UiTheme.EndPanel();
 
@@ -3537,6 +3549,152 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Put the tab back in the middle of the left edge.");
         ImGui.Unindent();
+    }
+
+    // ── Stop & alerts [STOP-ALERT] [FC-RANK-STOP] ─────────────
+
+    private static readonly string[] ChatSoundNames = Enumerable.Range(1, 16).Select(i => $"<se.{i}>").ToArray();
+    private static int _fcMilestoneToAdd = 8;
+
+    /// <summary>[FC-RANK-STOP] Dashboard line: FC rank, next milestone, and a pending stop.</summary>
+    private static void DrawFcRankLine(Configuration cfg)
+    {
+        var known = FcRankMonitor.TryGetFcRank(out _);
+        UiTheme.Icon(FontAwesomeIcon.Users, known ? UiTheme.Accent : UiTheme.Gray);
+        ImGui.SameLine(0, 6);
+        ImGui.TextColored(UiTheme.TextBright, "FC");
+        ImGui.SameLine(0, 8);
+
+        var pending = Plugin.Controller.PendingStopReason;
+        var detail = pending != null ? $"{pending} — stopping at the next safe point" : FcRankMonitor.StatusLine(cfg);
+        var shown = UiTheme.Ellipsize(detail, ImGui.GetContentRegionAvail().X);
+        ImGui.TextColored(pending != null ? UiTheme.Yellow : UiTheme.Gray, shown);
+        if (shown != detail && ImGui.IsItemHovered())
+            ImGui.SetTooltip(detail);
+    }
+
+    /// <summary>[FC-RANK-STOP] [STOP-ALERT] The FC rank milestone stop and the stop alert sound.</summary>
+    private static void DrawStopAlertsSection(Configuration cfg)
+    {
+        // ── FC rank milestone stop ──
+        ImGui.TextColored(UiTheme.Accent, "Free Company rank milestone");
+
+        var contentId = FcRankMonitor.CurrentContentId();
+        if (contentId == 0)
+        {
+            ImGui.TextDisabled("Log in to set this character's FC milestones.");
+        }
+        else
+        {
+            var fc = cfg.FcMilestonesFor(contentId);
+
+            var enabled = fc.Enabled;
+            if (ImGui.Checkbox("Enable FC rank milestone stop", ref enabled))
+            { fc.Enabled = enabled; cfg.Save(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Stops the farm (GC loop, relic farm, leveling, moogle) when this character's Free Company\nreaches a milestone rank above the rank it had when the farm started.\nThe stop waits for a safe point: the current delivery, purchase or duty finishes first.\nSettings are per character, so free trial characters in different FCs each keep their own.");
+
+            var pending = Plugin.Controller.PendingStopReason;
+            ImGui.TextColored(pending != null ? UiTheme.Yellow : FcRankMonitor.TryGetFcRank(out _) ? UiTheme.Teal : UiTheme.Gray,
+                pending != null ? $"{pending} — stopping at the next safe point" : FcRankMonitor.StatusLine(cfg));
+
+            var everyRank = fc.StopOnEveryRankUp;
+            if (ImGui.Checkbox("Stop on every rank up", ref everyRank))
+            { fc.StopOnEveryRankUp = everyRank; cfg.Save(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Stop the first time the FC ranks up, whatever the milestones below say.");
+
+            if (everyRank)
+                ImGui.BeginDisabled();
+
+            ImGui.SetNextItemWidth(100);
+            if (ImGui.InputInt("##fcMilestoneAdd", ref _fcMilestoneToAdd, 1, 5))
+                _fcMilestoneToAdd = Math.Clamp(_fcMilestoneToAdd, FcRankMonitor.MinRank, FcRankMonitor.MaxRank);
+            ImGui.SameLine();
+            if (ImGui.Button("Add milestone") && !fc.Ranks.Contains(_fcMilestoneToAdd))
+            {
+                fc.Ranks.Add(_fcMilestoneToAdd);
+                fc.Ranks.Sort();
+                cfg.Save();
+            }
+
+            if (fc.Ranks.Count == 0)
+            {
+                ImGui.TextDisabled("No milestones yet — add a rank from 1 to 30.");
+            }
+            else
+            {
+                int? remove = null;
+                for (var i = 0; i < fc.Ranks.Count; i++)
+                {
+                    if (i > 0)
+                        ImGui.SameLine(0, 6);
+                    if (ImGui.SmallButton($"Rank {fc.Ranks[i]}  ×##fcRank{fc.Ranks[i]}"))
+                        remove = fc.Ranks[i];
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Remove this milestone");
+                }
+
+                if (remove is { } r)
+                {
+                    fc.Ranks.Remove(r);
+                    cfg.Save();
+                }
+            }
+
+            if (everyRank)
+                ImGui.EndDisabled();
+        }
+
+        ImGui.Spacing();
+        UiTheme.GoldFadeRule();
+
+        // ── Stop alert ──
+        ImGui.TextColored(UiTheme.Accent, "Stop alert");
+
+        var play = cfg.PlayStopSound;
+        if (ImGui.Checkbox("Play sound when the farm stops", ref play))
+        { cfg.PlayStopSound = play; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Plays on every stop: errors, stuck or timed-out steps, run limits, tomestone caps,\nthe relic farm finishing, leveling finishing and the FC milestone.\nEvery stop also prints \"[SealBreaker] Farm stopped: reason.\" in chat.");
+
+        var manual = cfg.PlayStopSoundOnManualStop;
+        if (ImGui.Checkbox("Also play on manual stop", ref manual))
+        { cfg.PlayStopSoundOnManualStop = manual; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Also play when you stop the farm yourself: the Stop button, stop after this run,\nor a Dashboard test finishing.");
+
+        var effect = Math.Clamp(cfg.StopSoundEffect, StopAlertService.MinEffect, StopAlertService.MaxEffect) - 1;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.Combo("Chat sound", ref effect, ChatSoundNames, ChatSoundNames.Length))
+        { cfg.StopSoundEffect = effect + 1; cfg.Save(); }
+
+        var repeat = Math.Clamp(cfg.StopSoundRepeat, 1, StopAlertService.MaxRepeat);
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.SliderInt("Repeat", ref repeat, 1, StopAlertService.MaxRepeat))
+        { cfg.StopSoundRepeat = repeat; cfg.Save(); }
+
+        var path = cfg.StopSoundCustomPath ?? string.Empty;
+        ImGui.SetNextItemWidth(320);
+        if (ImGui.InputTextWithHint("Custom .wav", "C:\\path\\to\\alert.wav (optional)", ref path, 512))
+        { cfg.StopSoundCustomPath = path; cfg.Save(); }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Played through Windows instead of the chat sound, so it is heard with the game muted\nor in the background. Leave empty to use the chat sound.");
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Use chat sound"))
+            { cfg.StopSoundCustomPath = string.Empty; cfg.Save(); }
+        }
+        if (StopAlertService.CustomPathMissing(cfg))
+            ImGui.TextColored(UiTheme.Yellow, "File not found — the chat sound plays instead.");
+
+        if (ImGui.Button("Test sound"))
+            StopAlertService.Play(cfg);
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Other plugins can listen for SealBreaker.FarmStopped and SealBreaker.FcRankMilestoneReached,");
+        ImGui.TextDisabled("and read SealBreaker.GetFcRank, over IPC.");
     }
 
     private static void DrawGrandCompanyLine(Configuration cfg)

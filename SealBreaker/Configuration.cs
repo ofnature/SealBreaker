@@ -85,6 +85,20 @@ public class GcPortTicketShopSettings
     public int BuyQty { get; set; } = 1;
 }
 
+/// <summary>[FC-RANK-STOP] One character's FC rank milestone settings.</summary>
+[Serializable]
+public class FcMilestoneSettings
+{
+    /// <summary>Master toggle: stop the farm when the FC reaches a milestone rank.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Target FC ranks (1–30). The farm stops at the first one reached above the rank it started at.</summary>
+    public List<int> Ranks { get; set; } = new();
+
+    /// <summary>Stop on any rank up, ignoring <see cref="Ranks"/>.</summary>
+    public bool StopOnEveryRankUp { get; set; }
+}
+
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
@@ -96,7 +110,9 @@ public class Configuration : IPluginConfiguration
     public const int AdsRepairModeNpcNoInn = 2;
     public const int AdsRepairModeNpcNoTeleportNoInn = 3;
 
-    public int Version { get; set; } = 20;
+    // [STOP-ALERT] [FC-RANK-STOP] v21 adds stop-alert and FC milestone settings (defaults only).
+    // public int Version { get; set; } = 20;
+    public int Version { get; set; } = 21;
 
     // ── Farm mode ─────────────────────────────────────────────
     public const int FarmModeGrandCompany = 0;
@@ -308,6 +324,46 @@ public class Configuration : IPluginConfiguration
     public bool EchoToChat { get; set; } = false;
     public bool ShowWindowBanner { get; set; } = false;
 
+    // ── Stop alert [STOP-ALERT] ───────────────────────────────
+
+    /// <summary>Play a sound whenever the farm stops.</summary>
+    public bool PlayStopSound { get; set; }
+
+    /// <summary>Also play it when the stop was manual (Stop button, stop-after-run, a test finishing).</summary>
+    public bool PlayStopSoundOnManualStop { get; set; }
+
+    /// <summary>Chat sound effect &lt;se.1&gt;–&lt;se.16&gt;.</summary>
+    public int StopSoundEffect { get; set; } = 1;
+
+    /// <summary>How many times the alert plays (1–5).</summary>
+    public int StopSoundRepeat { get; set; } = 1;
+
+    /// <summary>A .wav played through Windows instead of the chat sound; empty = use the chat sound.
+    /// Audible when the game is muted or in the background.</summary>
+    public string StopSoundCustomPath { get; set; } = string.Empty;
+
+    // ── FC rank milestone stop [FC-RANK-STOP] ─────────────────
+
+    /// <summary>Per-character FC milestone settings, keyed by the character's content id —
+    /// free trial characters can be in different FCs.</summary>
+    public Dictionary<ulong, FcMilestoneSettings> FcMilestonesByCharacter { get; set; } = new();
+
+    /// <summary>This character's FC milestone settings, created on first use. 0 (not logged in) gets
+    /// a throwaway instance so callers never see null and nothing is saved under it.</summary>
+    public FcMilestoneSettings FcMilestonesFor(ulong contentId)
+    {
+        if (contentId == 0)
+            return new FcMilestoneSettings();
+
+        if (!FcMilestonesByCharacter.TryGetValue(contentId, out var settings))
+        {
+            settings = new FcMilestoneSettings();
+            FcMilestonesByCharacter[contentId] = settings;
+        }
+
+        return settings;
+    }
+
     public GcTownNavSettings TownNav(int gcIdx) =>
         GcTownNav[Math.Clamp(gcIdx, 0, GcTownNav.Length - 1)];
 
@@ -341,8 +397,21 @@ public class Configuration : IPluginConfiguration
         EnsureGcShopBuyLists();
         EnsureDesynthDefaults();
 
+        // [STOP-ALERT] [FC-RANK-STOP] v21 only adds settings with defaults. A v20 config takes the
+        // bump here instead of the steps below, which re-run normalizers (e.g. forcing repair back
+        // on in Gridania/Ul'dah) that a v20 config already passed.
+        // if (Version >= 20)
+        //     return;
         if (Version >= 20)
+        {
+            if (Version < 21)
+            {
+                Version = 21;
+                Save();
+            }
+
             return;
+        }
 
         if (Version < 4)
         {
@@ -438,7 +507,9 @@ public class Configuration : IPluginConfiguration
         if (Version < 20 && RunsPerCycle > 1 && !AllowMultiRunPerCycle)
             RunsPerCycle = 1;
 
-        Version = 20;
+        // [STOP-ALERT] [FC-RANK-STOP]
+        // Version = 20;
+        Version = 21;
         Save();
     }
 

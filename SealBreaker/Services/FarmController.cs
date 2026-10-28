@@ -478,6 +478,10 @@ public sealed class FarmController : IDisposable
         IsRunning = true; TotalCycles = 0; TotalRuns = 0; TotalSeals = 0;
         TotalDuckbones = 0; StartTime = DateTime.Now; _runsThisCycle = 0; _cycleCounted = false; LastError = null;
         StopAfterRunRequested = false;
+        // [STOP-ALERT] [FC-RANK-STOP]
+        _pendingStop = null;
+        _fcBaselineRank = 0; _fcBaselineId = 0; _fcMilestoneFired = false;
+        _fcNextPollUtc = DateTime.MinValue; _fcRefreshRequested = true;
         _currentRunStart = default;
         _runClearTimes.Clear();
         _gcInitialSpend = true; _deliveryListEmpty = false; _deliveryBlockedByCap = false;
@@ -741,7 +745,39 @@ public sealed class FarmController : IDisposable
             : "Stop-after-run cancelled — the farm keeps looping");
     }
 
-    public void Stop()
+    // [STOP-ALERT] Stop() routes through StopFarm; its body moved to WindDownFarm().
+    // public void Stop()
+    // {
+        // SetMemberHold(false); // broadcast the clear before anything else winds down
+        // IsRunning = false;
+        // StopAfterRunRequested = false;
+        // _repairTestMode = false;
+        // _deliveryTestMode = false;
+        // _shopTestMode = false;
+        // _extractTestMode = false;
+        // _relicSpendTestMode = false;
+        // _oneShotBuyEntry = null;
+        // _oneShotBuyAttemptSent = false;
+        // _automationOwnsGcPersonnelUi = false;
+        // ResetMateriaExtractionState();
+        // ResetDutySupportQueueState();
+        // _adsLeaveRequestedForFinalRun = false;
+        // _lastAdsCombatRefreshUtc = DateTime.MinValue;
+        // CloseMateriaExtractionUi();
+        // IpcManager.VnavStop();
+        // IpcManager.LifestreamAbort();
+        // StopDutyRunner();
+        // _currentTask = null;
+        // _expectNpcMenu = false;
+        // GotoState(FarmState.Idle);
+        // Log("Farm stopped.");
+    // }
+    /// <summary>The user's Stop button (also "Clear error"). Routes through <see cref="StopFarm"/>.</summary>
+    public void Stop() => StopFarm("Stopped by user", StopKind.Manual);
+
+    /// <summary>[STOP-ALERT] What Stop() did before it routed through <see cref="StopFarm"/>: halt
+    /// the farm, the duty runner, navigation and Lifestream, and return to Idle.</summary>
+    private void WindDownFarm()
     {
         SetMemberHold(false); // broadcast the clear before anything else winds down
         IsRunning = false;
@@ -765,13 +801,182 @@ public sealed class FarmController : IDisposable
         _currentTask = null;
         _expectNpcMenu = false;
         GotoState(FarmState.Idle);
-        Log("Farm stopped.");
+    }
+
+    // ── Central stop [STOP-ALERT] [FC-RANK-STOP] ──────────────
+
+    /// <summary>How the farm came to stop — picks the wind-down and whether the stop alert plays.</summary>
+    public enum StopKind
+    {
+        /// <summary>The user's own stop: Stop button, stop-after-run. Quiet unless "Also play on manual stop".</summary>
+        Manual,
+        /// <summary>A stop condition: run limit, tomestone cap, relic keeps met, leveling done, FC milestone.</summary>
+        Condition,
+        /// <summary>A hard error: the farm stops at once and shows the error.</summary>
+        Error,
+        /// <summary>A Farm-tab test finished. Treated like a manual stop for the alert.</summary>
+        TestFinished,
+    }
+
+    private (string Reason, StopKind Kind)? _pendingStop;
+
+    /// <summary>A deferred stop waiting for the next safe checkpoint, if any.</summary>
+    public string? PendingStopReason => _pendingStop?.Reason;
+
+    /// <summary>
+    /// [STOP-ALERT] Every stop of the farm goes through here: manual stops, stop conditions, errors and test
+    /// finishes. Any stop condition added later must call this (or <see cref="RequestStop"/> to wait for a
+    /// safe checkpoint), never wind the farm down by hand.
+    /// <para>
+    /// Winds the farm down for the kind of stop, then logs the reason, prints
+    /// "[SealBreaker] Farm stopped: reason." in chat, plays the stop alert and raises SealBreaker.FarmStopped.
+    /// A stop when nothing was running (a pre-start validation error, Stop on an idle farm) only does the
+    /// wind-down. Safe from any thread: off the framework thread the farm halts at once (IsRunning) and the
+    /// rest runs on the next framework tick, as the old off-thread Stop() calls needed.
+    /// </para>
+    /// </summary>
+    public void StopFarm(string reason, StopKind kind)
+    {
+        if (!Service.Framework.IsInFrameworkUpdateThread)
+        {
+            var wasRunning = IsRunning;
+            IsRunning = false;
+            Service.Framework.RunOnFrameworkThread(() => StopFarmCore(reason, kind, wasRunning));
+            return;
+        }
+
+        StopFarmCore(reason, kind, IsRunning);
+    }
+
+    private void StopFarmCore(string reason, StopKind kind, bool wasRunning)
+    {
+        _pendingStop = null;
+
+        switch (kind)
+        {
+            case StopKind.Error:
+                ApplyErrorState(reason);
+                break;
+            case StopKind.TestFinished:
+                // The Finish*Test helpers reset their own test state first; this is what they did after it.
+                IsRunning = false;
+                GotoState(FarmState.Idle);
+                break;
+            default:
+                WindDownFarm();
+                break;
+        }
+
+        if (!wasRunning)
+        {
+            if (kind == StopKind.Error)
+                Service.ChatGui.PrintError($"[SealBreaker] {reason}");
+            else
+                Log("Farm stopped.");
+            return;
+        }
+
+        var line = $"Farm stopped: {reason.TrimEnd('.')}";
+        Service.PluginLog.Information($"[SealBreaker] {line}");
+        if (kind == StopKind.Error)
+        {
+            // ApplyErrorState already put the error itself in the Log tab.
+            Service.ChatGui.PrintError($"[SealBreaker] {line}.");
+        }
+        else
+        {
+            AddLogEntry(LogSeverity.Info, line);
+            Service.ChatGui.Print($"[SealBreaker] {line}.");
+        }
+
+        StopAlertService.OnFarmStopped(kind is StopKind.Manual or StopKind.TestFinished, Plugin.Config);
+        SealBreakerIpc.NotifyFarmStopped(reason);
+    }
+
+    /// <summary>
+    /// [STOP-ALERT] Stop at the next safe checkpoint instead of now — never mid-delivery, mid-purchase or
+    /// mid-duty. In the GC loop the cycle's turn-in and buying still run. The alert plays when the stop
+    /// happens, not when it is requested.
+    /// </summary>
+    public void RequestStop(string reason, StopKind kind)
+    {
+        if (!IsRunning || _pendingStop != null)
+            return;
+
+        _pendingStop = (reason, kind);
+        Log($"{reason} — finishing the current step, then stopping");
+    }
+
+    /// <summary>At a safe checkpoint: carry out a deferred stop. True when the farm stopped.</summary>
+    private bool TryApplyPendingStop()
+    {
+        if (_pendingStop is not { } pending)
+            return false;
+
+        StopFarm(pending.Reason, pending.Kind);
+        return true;
+    }
+
+    private static readonly TimeSpan FcPollInterval = TimeSpan.FromSeconds(5);
+    private int _fcBaselineRank;
+    private ulong _fcBaselineId;
+    private bool _fcMilestoneFired;
+    private DateTime _fcNextPollUtc = DateTime.MinValue;
+    private bool _fcRefreshRequested;
+
+    /// <summary>
+    /// [FC-RANK-STOP] Every few seconds while the farm runs: read the FC rank and, once it passes a milestone
+    /// above the rank the farm started at, raise SealBreaker.FcRankMilestoneReached and request a safe stop.
+    /// The first successful read is the baseline, so FC data that loads after Start never looks like a
+    /// rank up; a different FC id starts a new baseline.
+    /// </summary>
+    private void FcMilestonePollTick()
+    {
+        if (_fcMilestoneFired || IsAnyTestMode)
+            return;
+
+        var settings = Plugin.Config.FcMilestonesFor(FcRankMonitor.CurrentContentId());
+        if (!settings.Enabled)
+            return;
+
+        if (_fcRefreshRequested)
+        {
+            _fcRefreshRequested = false;
+            FcRankMonitor.RequestRefresh();
+        }
+
+        var now = DateTime.UtcNow;
+        if (now < _fcNextPollUtc)
+            return;
+        _fcNextPollUtc = now + FcPollInterval;
+
+        if (!FcRankMonitor.TryGetFcRank(out var rank, out var fcId))
+            return;
+
+        if (fcId != _fcBaselineId)
+        {
+            _fcBaselineId = fcId;
+            _fcBaselineRank = rank;
+            Log(FcRankMonitor.NextMilestone(settings, rank) is { } next
+                ? $"FC rank {rank} — the farm stops when it reaches rank {next}"
+                : $"FC rank {rank} — no FC milestone above it, the FC stop will not trigger");
+            return;
+        }
+
+        if (!FcRankMonitor.MilestoneReached(settings, _fcBaselineRank, rank))
+            return;
+
+        _fcMilestoneFired = true;
+        SealBreakerIpc.NotifyFcRankMilestoneReached(rank);
+        RequestStop($"FC reached Rank {rank}", StopKind.Condition);
     }
 
     private Task<bool> IsNavCancelledAsync() => Task.FromResult(!IsRunning);
 
     private void OnFrameworkUpdate(IFramework fw)
     {
+        StopAlertService.Tick(); // [STOP-ALERT] plays after the farm has stopped, so before the IsRunning gate
+
         if (!Service.ClientState.IsLoggedIn)
         {
             if (IsRunning)
@@ -784,6 +989,7 @@ public sealed class FarmController : IDisposable
 
         if (!IsRunning) return;
         MoogleHoldBroadcastTick();
+        FcMilestonePollTick(); // [FC-RANK-STOP]
         if (_currentTask is { IsCompleted: false }) return;
         if (_currentTask is { IsFaulted: true })
         {
@@ -853,22 +1059,33 @@ public sealed class FarmController : IDisposable
 
                 if (StopAfterRunRequested)
                 {
-                    Log("Stop-after-run: stopping before the next duty.");
-                    Stop();
+                    // [STOP-ALERT]
+                    // Log("Stop-after-run: stopping before the next duty.");
+                    // Stop();
+                    StopFarm("Stopped before the next duty as requested", StopKind.Manual);
                     break;
                 }
 
+                // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint for every mode: outside any duty, and the GC
+                // leg (delivery, buying, repair, extraction) has finished — a deferred stop lands here.
+                if (TryApplyPendingStop())
+                    break;
+
                 if (cfg.TotalRunLimit > 0 && TotalRuns >= cfg.TotalRunLimit)
                 {
-                    Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — stopping.");
-                    Stop();
+                    // [STOP-ALERT]
+                    // Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — stopping.");
+                    // Stop();
+                    StopFarm($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit})", StopKind.Condition);
                     break;
                 }
 
                 if (TomestoneCapReached(cfg))
                 {
-                    Log($"{TomestoneCapLabel(cfg)} — stopping.");
-                    Stop();
+                    // [STOP-ALERT]
+                    // Log($"{TomestoneCapLabel(cfg)} — stopping.");
+                    // Stop();
+                    StopFarm(TomestoneCapLabel(cfg), StopKind.Condition);
                     break;
                 }
 
@@ -904,8 +1121,11 @@ public sealed class FarmController : IDisposable
                 {
                     if (RelicKeepTargetsMet(cfg))
                     {
-                        Log($"Tomestone farm complete — all arcanite keep amounts reached. {RelicKeepSummary(cfg)}");
-                        Stop();
+                        // [STOP-ALERT]
+                        // Log($"Tomestone farm complete — all arcanite keep amounts reached. {RelicKeepSummary(cfg)}");
+                        // Stop();
+                        Log(RelicKeepSummary(cfg));
+                        StopFarm("Tomestone farm complete — all arcanite keep amounts reached", StopKind.Condition);
                         break;
                     }
 
@@ -996,7 +1216,8 @@ public sealed class FarmController : IDisposable
                     if (dutyStopped && (_runsThisCycle + 1 >= cfg.RunsPerCycle
                                         || StopAfterRunRequested
                                         || (cfg.TotalRunLimit > 0 && TotalRuns + 1 >= cfg.TotalRunLimit)
-                                        || TomestoneCapReached(cfg)))
+                                        || TomestoneCapReached(cfg)
+                                        || _pendingStop != null)) // [FC-RANK-STOP] [STOP-ALERT]
                     {
                         if (!_adsLeaveRequestedForFinalRun)
                         {
@@ -1025,8 +1246,10 @@ public sealed class FarmController : IDisposable
 
                     if (StopAfterRunRequested)
                     {
-                        Log($"Run complete — stopping as requested (total runs this session: {TotalRuns}).");
-                        Stop();
+                        // [STOP-ALERT]
+                        // Log($"Run complete — stopping as requested (total runs this session: {TotalRuns}).");
+                        // Stop();
+                        StopFarm($"Run complete — stopped as requested (total runs this session: {TotalRuns})", StopKind.Manual);
                         break;
                     }
 
@@ -1038,7 +1261,14 @@ public sealed class FarmController : IDisposable
                     if (tomestoneCapReached && _runsThisCycle < cfg.RunsPerCycle)
                         Log($"{TomestoneCapLabel(cfg)} — GC turn-in next, then stopping");
 
-                    if (_runsThisCycle >= cfg.RunsPerCycle || runLimitReached || tomestoneCapReached)
+                    // [FC-RANK-STOP] [STOP-ALERT] A deferred stop ends the cycle like the run limit: the GC
+                    // turn-in and buying still run, and the stop lands at the next StartDuty.
+                    var stopPending = _pendingStop != null;
+                    if (stopPending && _runsThisCycle < cfg.RunsPerCycle)
+                        Log($"{PendingStopReason} — GC turn-in next, then stopping");
+
+                    // if (_runsThisCycle >= cfg.RunsPerCycle || runLimitReached || tomestoneCapReached)
+                    if (_runsThisCycle >= cfg.RunsPerCycle || runLimitReached || tomestoneCapReached || stopPending)
                     {
                         _deliveryListEmpty = false;
                         _dutyExitReadyAt   = null;
@@ -1334,10 +1564,17 @@ public sealed class FarmController : IDisposable
 
             case FarmState.CheckTomeSpend:
             {
+                // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint: not in a duty, no purchase in flight.
+                if (TryApplyPendingStop())
+                    break;
+
                 if (RelicKeepTargetsMet(cfg))
                 {
-                    Log($"Tomestone farm complete — all arcanite keep amounts reached. {RelicKeepSummary(cfg)}");
-                    Stop();
+                    // [STOP-ALERT]
+                    // Log($"Tomestone farm complete — all arcanite keep amounts reached. {RelicKeepSummary(cfg)}");
+                    // Stop();
+                    Log(RelicKeepSummary(cfg));
+                    StopFarm("Tomestone farm complete — all arcanite keep amounts reached", StopKind.Condition);
                     break;
                 }
 
@@ -1366,6 +1603,10 @@ public sealed class FarmController : IDisposable
 
             case FarmState.MoogleHoldWait:
             {
+                // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint: out of the trial, nothing queued yet.
+                if (TryApplyPendingStop())
+                    break;
+
                 var holds = FreshRepairHolds();
                 var inside = PartyMembersStillInDuty(cfg);
                 if (holds.Count == 0 && inside.Count == 0)
@@ -1472,15 +1713,23 @@ public sealed class FarmController : IDisposable
 
                     if (StopAfterRunRequested)
                     {
-                        Log($"Run complete — stopping as requested (total runs this session: {TotalRuns}).");
-                        Stop();
+                        // [STOP-ALERT]
+                        // Log($"Run complete — stopping as requested (total runs this session: {TotalRuns}).");
+                        // Stop();
+                        StopFarm($"Run complete — stopped as requested (total runs this session: {TotalRuns})", StopKind.Manual);
                         break;
                     }
 
+                    // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint: out of the trial and settled.
+                    if (TryApplyPendingStop())
+                        break;
+
                     if (cfg.TotalRunLimit > 0 && TotalRuns >= cfg.TotalRunLimit)
                     {
-                        Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — stopping.");
-                        Stop();
+                        // [STOP-ALERT]
+                        // Log($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit}) — stopping.");
+                        // Stop();
+                        StopFarm($"Total run limit reached ({TotalRuns}/{cfg.TotalRunLimit})", StopKind.Condition);
                         break;
                     }
 
@@ -1498,6 +1747,10 @@ public sealed class FarmController : IDisposable
 
                 if (_memberHoldActive && CanRunWorldAutomation())
                     SetMemberHold(false);
+
+                // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint: idle outside the duty.
+                if (TryApplyPendingStop())
+                    break;
 
                 StatusQuiet("Waiting for the leader's duty queue...");
                 break;
@@ -1530,12 +1783,15 @@ public sealed class FarmController : IDisposable
     {
         _repairTestMode = false;
         _automationOwnsGcPersonnelUi = false;
-        IsRunning = false;
+        // [STOP-ALERT]
+        // IsRunning = false;
         _repairAllClicked = false;
         _repairYesnoLogged = false;
         _repairPhaseSince = null;
-        GotoState(FarmState.Idle);
-        Log("Repair test finished.");
+        // [STOP-ALERT]
+        // GotoState(FarmState.Idle);
+        // Log("Repair test finished.");
+        StopFarm("Repair test finished", StopKind.TestFinished);
     }
 
     private void FinishDeliveryTest()
@@ -1546,9 +1802,11 @@ public sealed class FarmController : IDisposable
         if (ShouldAutoDismissGcOfficerMenu())
             Service.Framework.RunOnFrameworkThread(CloseExpertDeliveryUiForce);
         _automationOwnsGcPersonnelUi = false;
-        IsRunning = false;
-        GotoState(FarmState.Idle);
-        Log("Expert Delivery test finished.");
+        // [STOP-ALERT]
+        // IsRunning = false;
+        // GotoState(FarmState.Idle);
+        // Log("Expert Delivery test finished.");
+        StopFarm("Expert Delivery test finished", StopKind.TestFinished);
     }
 
     private void FinishShopTest()
@@ -1563,9 +1821,11 @@ public sealed class FarmController : IDisposable
         ResetBuyAttempt();
         _buyPhaseSince = null;
         _buyFindItemFailures = 0;
-        IsRunning = false;
-        GotoState(FarmState.Idle);
-        Log("GC shop test finished.");
+        // [STOP-ALERT]
+        // IsRunning = false;
+        // GotoState(FarmState.Idle);
+        // Log("GC shop test finished.");
+        StopFarm("GC shop test finished", StopKind.TestFinished);
     }
 
     private static bool IsInGcAcceptedZone(int gcIdx, uint zoneId)
@@ -3492,6 +3752,7 @@ public sealed class FarmController : IDisposable
             return;
 
         _deliveryFinishing = false;
+        _fcRefreshRequested = true; // [FC-RANK-STOP] the turn-in may have ranked the FC up
 
         if (_deliveryTestMode)
         {
@@ -4858,8 +5119,10 @@ public sealed class FarmController : IDisposable
         if (wasTest)
         {
             _extractTestMode = false;
-            IsRunning = false;
-            GotoState(FarmState.Idle);
+            // [STOP-ALERT]
+            // IsRunning = false;
+            // GotoState(FarmState.Idle);
+            StopFarm("Materia extraction test finished", StopKind.TestFinished);
             return;
         }
 
@@ -6885,7 +7148,9 @@ public sealed class FarmController : IDisposable
             if (_relicSpendTestMode)
             {
                 await LogAsync($"Relic spend test complete. {RelicKeepSummary(cfg)}");
-                Stop();
+                // [STOP-ALERT] Same full wind-down Stop() gave it, so StopKind.Manual (alert as a manual stop).
+                // Stop();
+                StopFarm("Relic spend test complete", StopKind.Manual);
                 return;
             }
 
@@ -6939,7 +7204,9 @@ public sealed class FarmController : IDisposable
                     var failed = tracks.FirstOrDefault(t => t.Row == row);
                     await LogAsync($"  {failed?.Abbr ?? row.ToString()} — job switch failed this session; check its gearset");
                 }
-                Stop();
+                // [STOP-ALERT]
+                // Stop();
+                StopFarm($"Leveling complete — nothing selectable below level {target}", StopKind.Condition);
                 return;
             }
 
@@ -8032,7 +8299,28 @@ public sealed class FarmController : IDisposable
         Log(msg);
     }
 
-    private void SetError(string msg)
+    // [STOP-ALERT] SetError routes through StopFarm; its body moved to ApplyErrorState().
+    // private void SetError(string msg)
+    // {
+        // _expectNpcMenu = false;
+        // _automationOwnsGcPersonnelUi = false;
+        // _repairTestMode = false;
+        // _deliveryTestMode = false;
+        // _shopTestMode = false;
+        // _extractTestMode = false;
+        // ResetMateriaExtractionState();
+        // ResetDutySupportQueueState();
+        // CloseMateriaExtractionUi();
+        // LastError = msg; StatusMessage = $"ERROR: {msg}"; State = FarmState.Error; IsRunning = false;
+        // AddLogEntry(LogSeverity.Error, msg);
+        // Service.PluginLog.Error($"[SealBreaker] {msg}");
+        // Service.ChatGui.PrintError($"[SealBreaker] {msg}");
+    // }
+    private void SetError(string msg) => StopFarm(msg, StopKind.Error);
+
+    /// <summary>[STOP-ALERT] What SetError did before it routed through <see cref="StopFarm"/>, minus the
+    /// chat line (StopFarm prints it). Errors keep exactly these side effects.</summary>
+    private void ApplyErrorState(string msg)
     {
         _expectNpcMenu = false;
         _automationOwnsGcPersonnelUi = false;
@@ -8046,7 +8334,6 @@ public sealed class FarmController : IDisposable
         LastError = msg; StatusMessage = $"ERROR: {msg}"; State = FarmState.Error; IsRunning = false;
         AddLogEntry(LogSeverity.Error, msg);
         Service.PluginLog.Error($"[SealBreaker] {msg}");
-        Service.ChatGui.PrintError($"[SealBreaker] {msg}");
     }
 
     private static void Log(string msg)

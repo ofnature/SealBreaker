@@ -39,6 +39,7 @@ public sealed class Plugin : IDalamudPlugin
         Config.EnsureGcTownNav();
         Config.ApplyAutomaticGrandCompanySettings();
         Controller = new FarmController();
+        SealBreakerIpc.Register(_pi); // [STOP-ALERT] [FC-RANK-STOP] FarmStopped, FcRankMilestoneReached, GetFcRank
 
         var dir = Service.PluginInterface.AssemblyLocation.DirectoryName!;
         PluginIcon = LoadTexture(Path.Combine(dir, "icon.png"));
@@ -88,6 +89,7 @@ public sealed class Plugin : IDalamudPlugin
     public void Dispose()
     {
         Controller.Dispose();
+        SealBreakerIpc.Unregister(); // [STOP-ALERT] [FC-RANK-STOP]
         _windowSystem.RemoveAllWindows();
         _dockLayout.Dispose();
         _mainWindow.Dispose();
