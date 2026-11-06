@@ -745,6 +745,23 @@ public sealed class FarmController : IDisposable
             : "Stop-after-run cancelled — the farm keeps looping");
     }
 
+    /// <summary>IPC <c>SealBreaker.RequestStopAfterRun</c>: arm the same graceful stop as the UI's
+    /// stop-after-run control, never a toggle — a second call keeps it armed. True when the farm was
+    /// running and will stop; false, with nothing changed, when idle. A Farm-tab test ends on its own,
+    /// so it is left alone and reported as stopping.</summary>
+    public bool RequestStopAfterRun()
+    {
+        if (!IsRunning)
+            return false;
+
+        if (IsAnyTestMode || StopAfterRunRequested)
+            return true;
+
+        StopAfterRunRequested = true;
+        Log("Stop requested by another plugin — the current run will finish, then the farm stops");
+        return true;
+    }
+
     // [STOP-ALERT] Stop() routes through StopFarm; its body moved to WindDownFarm().
     // public void Stop()
     // {
@@ -1747,6 +1764,17 @@ public sealed class FarmController : IDisposable
 
                 if (_memberHoldActive && CanRunWorldAutomation())
                     SetMemberHold(false);
+
+                // Stop-after-run with no run in progress: stop before the next one, or a member whose
+                // leader has stopped would wait forever. Once the leader's queue holds us, that run
+                // has begun — finish it (the run-end check above stops us).
+                if (StopAfterRunRequested && CanRunWorldAutomation()
+                    && !Service.Condition[ConditionFlag.InDutyQueue]
+                    && !Service.Condition[ConditionFlag.WaitingForDuty])
+                {
+                    StopFarm($"Stopped before the next duty as requested (total runs this session: {TotalRuns})", StopKind.Manual);
+                    break;
+                }
 
                 // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint: idle outside the duty.
                 if (TryApplyPendingStop())

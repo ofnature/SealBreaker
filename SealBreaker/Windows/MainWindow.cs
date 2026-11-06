@@ -3694,7 +3694,8 @@ public sealed class MainWindow : Window, IDisposable
 
         ImGui.Spacing();
         ImGui.TextDisabled("Other plugins can listen for SealBreaker.FarmStopped and SealBreaker.FcRankMilestoneReached,");
-        ImGui.TextDisabled("and read SealBreaker.GetFcRank, over IPC.");
+        ImGui.TextDisabled("read SealBreaker.GetFcRank and SealBreaker.IsBusy, and ask for a stop after the current run");
+        ImGui.TextDisabled("with SealBreaker.RequestStopAfterRun, over IPC.");
     }
 
     private static void DrawGrandCompanyLine(Configuration cfg)
