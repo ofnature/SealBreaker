@@ -3627,8 +3627,17 @@ public sealed class MainWindow : Window, IDisposable
                 int? remove = null;
                 for (var i = 0; i < fc.Ranks.Count; i++)
                 {
+                    // [FC-RANK-STOP] Wrap to the next line when the chip won't fit (as DrawPrereqChips does).
+                    // if (i > 0)
+                    //     ImGui.SameLine(0, 6);
                     if (i > 0)
+                    {
                         ImGui.SameLine(0, 6);
+                        var chipWidth = ImGui.CalcTextSize($"Rank {fc.Ranks[i]}  ×").X + ImGui.GetStyle().FramePadding.X * 2f;
+                        if (ImGui.GetContentRegionAvail().X < chipWidth)
+                            ImGui.NewLine();
+                    }
+
                     if (ImGui.SmallButton($"Rank {fc.Ranks[i]}  ×##fcRank{fc.Ranks[i]}"))
                         remove = fc.Ranks[i];
                     if (ImGui.IsItemHovered())

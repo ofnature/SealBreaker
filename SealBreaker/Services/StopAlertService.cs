@@ -2,6 +2,7 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace SealBreaker.Services;
 
@@ -21,9 +22,12 @@ internal static class StopAlertService
     public const int MaxRepeat = 5;
 
     private static readonly TimeSpan ChatSoundSpacing = TimeSpan.FromMilliseconds(700);
-    private static readonly TimeSpan WavSpacing = TimeSpan.FromMilliseconds(1500);
+    // [STOP-ALERT] A .wav now plays to its end on a worker thread before repeating; a fixed spacing
+    // restarted the file every 1.5 s and cut longer sounds off.
+    // private static readonly TimeSpan WavSpacing = TimeSpan.FromMilliseconds(1500);
 
-    private const uint SndAsync = 0x0001;
+    // private const uint SndAsync = 0x0001;
+    private const uint SndSync = 0x0000;
     private const uint SndNoDefault = 0x0002;
     private const uint SndFilename = 0x00020000;
 
@@ -32,6 +36,7 @@ internal static class StopAlertService
 
     private static readonly object Gate = new();
     private static int _remaining;
+    private static int _generation; // bumped by every Play(); a .wav loop from an earlier one stops
     private static DateTime _nextAtUtc;
     private static uint _effect = MinEffect;
     private static string? _wavPath;
@@ -58,6 +63,7 @@ internal static class StopAlertService
             _wavPath = string.IsNullOrEmpty(path) ? null : path;
             _remaining = Math.Clamp(cfg.StopSoundRepeat, 1, MaxRepeat);
             _nextAtUtc = DateTime.MinValue;
+            _generation++;
         }
     }
 
@@ -73,27 +79,45 @@ internal static class StopAlertService
     {
         uint effect;
         string? wav;
+        int plays;
+        int generation;
         lock (Gate)
         {
             if (_remaining <= 0 || DateTime.UtcNow < _nextAtUtc)
                 return;
 
-            _remaining--;
             effect = _effect;
             wav = _wavPath;
-            _nextAtUtc = DateTime.UtcNow + (wav != null ? WavSpacing : ChatSoundSpacing);
+            generation = _generation;
+            if (wav != null)
+            {
+                // The worker thread plays every repeat; nothing is left to schedule here.
+                plays = _remaining;
+                _remaining = 0;
+            }
+            else
+            {
+                plays = 1;
+                _remaining--;
+                _nextAtUtc = DateTime.UtcNow + ChatSoundSpacing;
+            }
         }
 
         try
         {
             if (wav != null)
             {
-                if (File.Exists(wav) && PlaySound(wav, IntPtr.Zero, SndFilename | SndAsync | SndNoDefault))
-                    return;
-
-                Service.PluginLog.Warning($"[SealBreaker] Stop alert: could not play \"{wav}\" — using <se.{effect}> instead.");
-                lock (Gate)
-                    _wavPath = null;
+                // [STOP-ALERT]
+                // if (File.Exists(wav) && PlaySound(wav, IntPtr.Zero, SndFilename | SndAsync | SndNoDefault))
+                //     return;
+                // Service.PluginLog.Warning($"[SealBreaker] Stop alert: could not play \"{wav}\" — using <se.{effect}> instead.");
+                // lock (Gate)
+                //     _wavPath = null;
+                if (File.Exists(wav))
+                    Task.Run(() => PlayWavRepeats(wav, plays, generation));
+                else
+                    FallBackToChatSound(wav, plays, generation);
+                return;
             }
 
             UIGlobals.PlayChatSoundEffect(effect);
@@ -103,6 +127,45 @@ internal static class StopAlertService
             Service.PluginLog.Warning($"[SealBreaker] Stop alert failed: {ex.Message}");
             lock (Gate)
                 _remaining = 0;
+        }
+    }
+
+    /// <summary>
+    /// Worker thread: play the .wav <paramref name="plays"/> times, each to its end (a synchronous
+    /// PlaySound returns when the sound finishes). A newer <see cref="Play"/> ends the loop — its own
+    /// PlaySound call cuts the current sound short, and the generation check stops the repeats.
+    /// </summary>
+    private static void PlayWavRepeats(string wav, int plays, int generation)
+    {
+        for (var i = 0; i < plays; i++)
+        {
+            lock (Gate)
+            {
+                if (generation != _generation)
+                    return;
+            }
+
+            if (!PlaySound(wav, IntPtr.Zero, SndFilename | SndSync | SndNoDefault))
+            {
+                FallBackToChatSound(wav, plays - i, generation);
+                return;
+            }
+        }
+    }
+
+    /// <summary>The .wav could not be played: hand the repeats still owed to the chat sound, which
+    /// <see cref="Tick"/> plays on the framework thread.</summary>
+    private static void FallBackToChatSound(string wav, int plays, int generation)
+    {
+        Service.PluginLog.Warning($"[SealBreaker] Stop alert: could not play \"{wav}\" — using the chat sound instead.");
+        lock (Gate)
+        {
+            if (generation != _generation)
+                return;
+
+            _wavPath = null;
+            _remaining = plays;
+            _nextAtUtc = DateTime.MinValue;
         }
     }
 }

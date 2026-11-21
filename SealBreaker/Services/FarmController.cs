@@ -904,6 +904,8 @@ public sealed class FarmController : IDisposable
         {
             AddLogEntry(LogSeverity.Info, line);
             Service.ChatGui.Print($"[SealBreaker] {line}.");
+            // [STOP-ALERT] Otherwise the window keeps the last step's status ("Run 3/3 complete").
+            StatusMessage = $"Stopped: {reason.TrimEnd('.')}";
         }
 
         StopAlertService.OnFarmStopped(kind is StopKind.Manual or StopKind.TestFinished, Plugin.Config);
@@ -935,6 +937,7 @@ public sealed class FarmController : IDisposable
     }
 
     private static readonly TimeSpan FcPollInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan FcBaselineDelay = TimeSpan.FromSeconds(5);
     private int _fcBaselineRank;
     private ulong _fcBaselineId;
     private bool _fcMilestoneFired;
@@ -959,7 +962,14 @@ public sealed class FarmController : IDisposable
         if (_fcRefreshRequested)
         {
             _fcRefreshRequested = false;
-            FcRankMonitor.RequestRefresh();
+            // [FC-RANK-STOP] No baseline yet: force the refresh and give its answer time to land before
+            // the first read. The cached rank can predate a rank-up that happened while the character
+            // sat in one zone, and a baseline taken from it would make that old rank-up stop the farm.
+            // FcRankMonitor.RequestRefresh();
+            var needBaseline = _fcBaselineId == 0;
+            FcRankMonitor.RequestRefresh(force: needBaseline);
+            if (needBaseline)
+                _fcNextPollUtc = DateTime.UtcNow + FcBaselineDelay;
         }
 
         var now = DateTime.UtcNow;
@@ -1768,16 +1778,26 @@ public sealed class FarmController : IDisposable
                 // Stop-after-run with no run in progress: stop before the next one, or a member whose
                 // leader has stopped would wait forever. Once the leader's queue holds us, that run
                 // has begun — finish it (the run-end check above stops us).
-                if (StopAfterRunRequested && CanRunWorldAutomation()
+                // [FC-RANK-STOP] [STOP-ALERT] Both stops below wait for this. Queued, or the duty about to
+                // pop, means the next run has begun: stopping then would let the duty pull in a
+                // character that nothing is driving.
+                var betweenRuns = CanRunWorldAutomation()
                     && !Service.Condition[ConditionFlag.InDutyQueue]
-                    && !Service.Condition[ConditionFlag.WaitingForDuty])
+                    && !Service.Condition[ConditionFlag.WaitingForDuty];
+
+                // [FC-RANK-STOP] [STOP-ALERT]
+                // if (StopAfterRunRequested && CanRunWorldAutomation()
+                //     && !Service.Condition[ConditionFlag.InDutyQueue]
+                //     && !Service.Condition[ConditionFlag.WaitingForDuty])
+                if (StopAfterRunRequested && betweenRuns)
                 {
                     StopFarm($"Stopped before the next duty as requested (total runs this session: {TotalRuns})", StopKind.Manual);
                     break;
                 }
 
-                // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint: idle outside the duty.
-                if (TryApplyPendingStop())
+                // [FC-RANK-STOP] [STOP-ALERT] Safe checkpoint: idle outside the duty, and not queued.
+                // if (TryApplyPendingStop())
+                if (betweenRuns && TryApplyPendingStop())
                     break;
 
                 StatusQuiet("Waiting for the leader's duty queue...");
